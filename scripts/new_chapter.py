@@ -17,6 +17,8 @@ from datetime import datetime
 
 from card_parser import extract_section, extract_bullets
 from common_io import load_project_state, load_volume_outline
+from narrative_context import NarrativeContext
+from state_tracker import StateTracker
 from path_rules import chapter_file, draft_prompt_file
 from progress_rules import get_current_progress, get_next_chapter
 
@@ -321,6 +323,14 @@ def generate_dynamic_content(
     include_power_system: bool
 ) -> str:
     """生成动态内容（项目信息、承接等）"""
+    # 新增：加载叙事上下文
+    narrative_ctx = NarrativeContext(project_dir)
+    prev_context = narrative_ctx.load_previous_context(ch_num, lookback=1)
+
+    # 新增：加载状态摘要
+    state_tracker = StateTracker(project_dir)
+    state_summary = state_tracker.get_state_summary(ch_num)
+
     specs = state.get("basic_specs", {})
     positioning = state.get("positioning", {})
     world = state.get("world", {})
@@ -429,6 +439,22 @@ def generate_dynamic_content(
 - 本章留下的钩子：{carry['本章留下的最强钩子是什么']}
 """
     
+    # 新增：场景锚点
+    if prev_context:
+        scene_anchor = prev_context.get("prev_1", {}).get("scene_anchor", "")
+        if scene_anchor:
+            prompt += f"""
+## 上一章结尾场景（场景衔接锚点）
+{scene_anchor}
+"""
+
+    # 新增：状态摘要
+    if state_summary:
+        prompt += f"""
+## 当前状态摘要
+{state_summary}
+"""
+
     # 章节结构建议（动态计算字数）
     prompt += f"""
 ## 动态章节结构
