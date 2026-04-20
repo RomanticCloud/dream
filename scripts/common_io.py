@@ -146,6 +146,32 @@ def extract_bullets(section_content: str) -> dict[str, str]:
     return result
 
 
+def find_chapter_path(project_dir: Path, chapter_num: int) -> Path | None:
+    """根据章节号查找章节文件路径
+
+    Args:
+        project_dir: 项目目录
+        chapter_num: 章节号（从1开始）
+
+    Returns:
+        章节文件路径，不存在时返回 None
+    """
+    chapters_per_volume = 10  # 默认值
+    state_file = project_dir / "wizard_state.json"
+    if state_file.exists():
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        arch = state.get("volume_architecture", {})
+        chapters_per_volume = arch.get("chapters_per_volume", 10)
+
+    vol_num = (chapter_num - 1) // chapters_per_volume + 1
+    vol_name = f"vol{vol_num:02d}"
+    chapter_file = project_dir / "chapters" / vol_name / f"{chapter_num:03d}_第{chapter_num}章.md"
+
+    if chapter_file.exists():
+        return chapter_file
+    return None
+
+
 def extract_all_bullets(section_content: str) -> list[str]:
     """从章节内容中提取所有要点
     

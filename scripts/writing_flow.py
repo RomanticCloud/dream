@@ -6,10 +6,13 @@ import sys
 from pathlib import Path
 
 from card_parser import extract_body
-from common_io import load_project_state
+from common_io import find_chapter_path, load_json_file, load_project_state, save_json_file
+from enhanced_validator import EnhancedValidator
+from narrative_context import NarrativeContext
 from path_rules import volume_memory_md
 from progress_rules import get_chapters_per_volume, get_current_progress
 from revision_state import get_pending_chapter_revision, get_volume_revision
+from state_tracker import StateTracker
 
 
 def get_target_info(state: dict) -> tuple[int, int, int]:
@@ -130,6 +133,14 @@ def run_writing_flow(project_dir: Path):
             print("请先完成当前章节的撰写")
             return
 
+        if status["status"] == "completed" and status.get("file"):
+            result = on_chapter_completed(project_dir, status["file"], current_ch)
+            if result["status"] == "drift_detected":
+                print(f"\n⚠ 检测到第{current_ch}章存在一致性问题：")
+                for issue in result["issues"]:
+                    print(f"  - {issue.message}")
+                print("建议检查后继续")
+
         if current_ch >= chapters_per_volume:
             if show_volume_boundary_actions(project_dir, state, current_vol):
                 return
@@ -141,6 +152,88 @@ def run_writing_flow(project_dir: Path):
 
     print(f"\n下一步：生成第{next_vol}卷第{next_ch}章")
     print("运行: python3 scripts/new_chapter.py <项目目录>")
+
+
+def log_drift_issues(project_dir: Path, chapter_num: int, issues: list):
+    """记录漂移问题到 drift_log.json"""
+    from datetime import datetime
+
+    drift_log_file = project_dir / "context" / "drift_log.json"
+
+    # 加载现有日志
+    if drift_log_file.exists():
+        drift_log = load_json_file(drift_log_file)
+    else:
+        drift_log = {"entries": []}
+
+    # 添加新条目
+    drift_log["entries"].append({
+        "chapter": chapter_num,
+        "timestamp": datetime.now().isoformat(),
+        "issues": [
+            {
+                "severity": issue.severity,
+                "message": issue.message,
+                "suggestion": issue.suggestion
+            }
+            for issue in issues
+        ]
+    })
+
+    # 保存
+    save_json_file(drift_log_file, drift_log)
+
+
+def on_chapter_completed(project_dir: Path, chapter_path: Path, chapter_num: int) -> dict:
+    """章节完成后的处理
+
+    1. 提取场景锚点
+    2. 生成叙事摘要
+    3. 更新状态跟踪器
+    4. 执行跨章一致性验证
+
+    Returns:
+        {"status": "success"} 或 {"status": "drift_detected", "issues": [...]}
+    """
+    # 1. 提取场景锚点
+    narrative_ctx = NarrativeContext(project_dir)
+    scene_anchor = narrative_ctx.extract_scene_anchor(chapter_path)
+    narrative_summary = narrative_ctx.generate_narrative_summary(chapter_path)
+
+    # 2. 保存章节上下文
+    narrative_ctx.save_chapter_context(chapter_num, {
+        "scene_anchor": scene_anchor,
+        "narrative_summary": narrative_summary
+    })
+
+    # 3. 更新状态跟踪器
+    state_tracker = StateTracker(project_dir)
+    state_tracker.update_character_state(chapter_path)
+    state_tracker.track_plot_threads(chapter_path)
+    state_tracker.track_foreshadowing(chapter_path)
+    state_tracker.update_last_chapter(chapter_num)
+
+    # 4. 跨章一致性验证（如果有上一章）
+    if chapter_num > 1:
+        prev_chapter_path = find_chapter_path(project_dir, chapter_num - 1)
+        if prev_chapter_path:
+            validator = EnhancedValidator(project_dir)
+            issues = validator.validate_cross_chapter_consistency(chapter_path, prev_chapter_path)
+
+            if issues:
+                # 记录漂移问题
+                log_drift_issues(project_dir, chapter_num, issues)
+
+                # 如果有严重问题，返回警告
+                critical_issues = [i for i in issues if i.severity == "error"]
+                if critical_issues:
+                    return {
+                        "status": "drift_detected",
+                        "issues": critical_issues,
+                        "chapter_num": chapter_num
+                    }
+
+    return {"status": "success"}
 
 
 def main():
