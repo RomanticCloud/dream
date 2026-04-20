@@ -52,6 +52,14 @@ class StateTracker:
         - 当前目标
         - 与其他人物的关系变化
         """
+        chapter_name = chapter_path.name
+        
+        # 幂等性保护：检查是否已处理过此章节
+        for char_data in self.state["characters"].values():
+            if char_data["states"] and char_data["states"][-1]["chapter"] == chapter_name:
+                # 已处理过此章节，跳过
+                return
+        
         content = chapter_path.read_text(encoding="utf-8")
         body = extract_body(content)
 
@@ -118,17 +126,20 @@ class StateTracker:
         """
         characters = {}
 
-        # 提取对话中的人物
-        dialogue_pattern = r"([\u4e00-\u9fa5]{2,4})(?:说|道|问|答|想|看|走|跑|：|:)"
+        # 提取对话中的人物（使用 lookahead 避免包含动作动词）
+        dialogue_pattern = r"([\u4e00-\u9fa5]{2,4})(?=[说|道|问|答|想|看|走|跑|：|:])"
         matches = re.findall(dialogue_pattern, body)
 
+        # 过滤掉常见非人物词
+        non_character_words = {"他", "她", "它", "这", "那", "什么", "怎么", "为什么", "哪里", "谁"}
         for name in set(matches):
-            characters[name] = {
-                "location": "未知",
-                "emotion": "未知",
-                "goal": "未知",
-                "relationship_changes": [],
-            }
+            if name not in non_character_words and len(name) >= 2:
+                characters[name] = {
+                    "location": "未知",
+                    "emotion": "未知",
+                    "goal": "未知",
+                    "relationship_changes": [],
+                }
 
         return characters
 
@@ -224,9 +235,9 @@ class StateTracker:
 
         简化实现：检查关键词重叠
         """
-        # 提取关键词（简化：取前5个字符）
-        key1 = text1[:5] if len(text1) > 5 else text1
-        key2 = text2[:5] if len(text2) > 5 else text2
+        # 提取关键词（简化：取前10个字符）
+        key1 = text1[:10] if len(text1) > 10 else text1
+        key2 = text2[:10] if len(text2) > 10 else text2
 
         return key1 in text2 or key2 in text1
 
