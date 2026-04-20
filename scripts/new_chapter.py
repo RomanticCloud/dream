@@ -622,24 +622,42 @@ def generate_chapter_with_subagent(
     ch_num: int,
     lookback: int = 0
 ) -> dict:
-    """使用子代理生成章节
+    """使用子代理生成章节（文件路径模式）
 
     Args:
         project_dir: 项目目录
         vol_num: 卷号
         ch_num: 章节号
-        lookback: 回溯章节数（0=全部）
+        lookback: 回溯章节数（0=全部，不使用）
 
     Returns:
         {
             "status": "prompt_ready" | "error",
             "prompt_file": "提示文件路径",
-            "chapters_loaded": 10,
-            "prompt_length": 50000
+            "prompt_length": 500
         }
     """
+    import time
+    start_time = time.time()
+
     generator = SubagentChapterGenerator(project_dir)
-    return generator.dispatch_chapter_generation(vol_num, ch_num, lookback)
+
+    # 使用文件路径模式生成提示
+    prompt = generator.generate_file_based_prompt(vol_num, ch_num)
+
+    # 保存提示到文件
+    prompt_file = project_dir / "context" / "subagent_prompt.md"
+    prompt_file.parent.mkdir(exist_ok=True)
+    prompt_file.write_text(prompt, encoding="utf-8")
+
+    generation_time = time.time() - start_time
+
+    return {
+        "status": "prompt_ready",
+        "prompt_file": str(prompt_file),
+        "prompt_length": len(prompt),
+        "generation_time": generation_time,
+    }
 
 
 def main():
@@ -736,12 +754,13 @@ def main():
         if result["status"] == "prompt_ready":
             print(f"✅ 子代理提示已准备就绪")
             print(f"   - 提示文件: {result['prompt_file']}")
-            print(f"   - 加载章节数: {result['chapters_loaded']}")
             print(f"   - 提示长度: {result['prompt_length']} 字符")
+            print(f"   - 生成耗时: {result['generation_time']:.2f} 秒")
             print(f"\n请使用子代理执行以下任务:")
             print(f"1. 读取提示文件: {result['prompt_file']}")
-            print(f"2. 根据提示生成第{ch_num}章内容")
-            print(f"3. 将生成的内容保存到章节文件")
+            print(f"2. 根据提示中的文件路径读取前文章节（正文+工作卡）")
+            print(f"3. 生成第{ch_num}章内容")
+            print(f"4. 分离输出正文和工作卡到指定路径")
         else:
             print(f"❌ 错误: {result.get('error', '未知错误')}")
 

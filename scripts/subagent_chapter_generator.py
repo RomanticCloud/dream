@@ -298,3 +298,140 @@ class SubagentChapterGenerator:
             return None
 
         return {"description": ch_match.group(0).strip()}
+
+    def generate_file_based_prompt(
+        self,
+        vol_num: int,
+        ch_num: int,
+    ) -> str:
+        """生成基于文件路径的提示（不嵌入内容）
+
+        Args:
+            vol_num: 当前卷号
+            ch_num: 当前章节号
+
+        Returns:
+            固定长度的提示，包含文件路径列表
+        """
+        # 加载项目配置
+        project_config = load_project_state(self.project_dir)
+        specs = project_config.get("basic_specs", {})
+        positioning = project_config.get("positioning", {})
+        naming = project_config.get("naming", {})
+
+        book_title = naming.get("selected_book_title", naming.get("book_title", "未命名"))
+        genres = specs.get("main_genres", specs.get("genres", []))
+        style_tone = specs.get("style_tone", "轻松幽默")
+        narrative_style = positioning.get("narrative_style", "第三人称有限视角")
+        min_words = specs.get("chapter_length_min", specs.get("min_words", 3500))
+        max_words = specs.get("chapter_length_max", specs.get("max_words", 4500))
+
+        # 构建前文章节文件路径
+        content_files = []
+        card_files = []
+
+        for i in range(1, ch_num):
+            content_files.append(f"chapters/vol{vol_num:02d}/ch{i:02d}.md")
+            card_files.append(f"chapters/vol{vol_num:02d}/cards/ch{i:02d}_card.md")
+
+        # 生成文件路径列表
+        content_files_list = "\n".join(
+            f"- /home/ubuntu/social-system-daily/{f}" for f in content_files
+        )
+        card_files_list = "\n".join(
+            f"- /home/ubuntu/social-system-daily/{f}" for f in card_files
+        )
+
+        # 输出路径
+        content_output = f"/home/ubuntu/social-system-daily/chapters/vol{vol_num:02d}/ch{ch_num:02d}.md"
+        card_output = f"/home/ubuntu/social-system-daily/chapters/vol{vol_num:02d}/cards/ch{ch_num:02d}_card.md"
+
+        # 生成提示
+        prompt = f"""# 章节生成任务
+
+## 项目信息
+- 书名：{book_title}
+- 题材：{', '.join(genres)}
+- 文风：{style_tone}
+- 叙事视角：{narrative_style}
+- 当前卷：第{vol_num}卷
+- 当前章节：第{ch_num}章
+- 字数要求：{min_words}-{max_words}字
+
+## 需要读取的文件
+
+### 前文章节正文
+请读取以下正文文件：
+{content_files_list}
+
+### 前文章节工作卡
+请读取以下工作卡文件（包含状态、情节、资源、关系等信息）：
+{card_files_list}
+
+## 生成要求
+
+1. **连续性要求**
+   - 严格保持与前文的人物状态一致
+   - 对话风格、语气保持自然延续
+   - 场景描写风格一致
+   - 时间线合理衔接
+
+2. **内容要求**
+   - 字数：{min_words}-{max_words}字
+   - 包含完整的工作卡（状态卡、情节卡、资源卡、关系卡、情绪弧线卡、承上启下卡）
+   - 承接前文章节的结尾
+   - 发展故事主线
+
+3. **格式要求**
+   - 使用标准章节格式：`# 第{ch_num}章 标题`
+   - 正文部分
+   - `## 内部工作卡` 标记
+   - 六张工作卡（每张用 `### N. 卡片名` 标记）
+
+4. **工作卡格式**
+
+   ### 1. 状态卡
+   - 主角当前位置：
+   - 主角当前情绪：
+   - 主角当前目标：
+   - 主角当前伤势/疲劳：
+
+   ### 2. 情节卡
+   - 本章关键事件：
+   - 新埋伏笔：
+   - 回收伏笔：
+
+   ### 3. 资源卡
+   - 本章获得资源：
+   - 本章消耗资源：
+
+   ### 4. 关系卡
+   - 主要人物：
+   - 人物变化：
+
+   ### 5. 情绪弧线卡
+   - 起始情绪：
+   - 变化过程：
+   - 目标情绪：
+
+   ### 6. 承上启下卡
+   - 下章必须接住什么：
+   - 本章留下的最强钩子是什么：
+
+5. **禁止事项**
+   - 不得出现与前文矛盾的设定
+   - 不得遗忘前文埋下的伏笔
+   - 不得突变人物性格或关系
+   - 不得出现AI痕迹（如"小明微微一笑"、"张三若有所思"等模式化表达）
+
+## 输出格式
+
+请生成完整的第{ch_num}章内容，并分离输出：
+
+1. **正文**保存到：`{content_output}`
+2. **工作卡**保存到：`{card_output}`
+
+注意：工作卡必须使用 `## 内部工作卡` 标记开始。
+"""
+
+        return prompt

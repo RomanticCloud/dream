@@ -11,7 +11,15 @@ from common_io import load_project_state
 
 def get_chapters_per_volume(project_dir: Path) -> int:
     state = load_project_state(project_dir)
-    return state.get("volume_architecture", {}).get("chapters_per_volume", 10)
+    # 尝试从 basic_specs 获取 chapters_per_volume
+    if "basic_specs" in state and "chapters_per_volume" in state["basic_specs"]:
+        return state["basic_specs"]["chapters_per_volume"]
+    # 尝试从 volume_architecture 获取（如果它是字典）
+    vol_arch = state.get("volume_architecture", {})
+    if isinstance(vol_arch, dict):
+        return vol_arch.get("chapters_per_volume", 10)
+    # 默认值
+    return 10
 
 
 def get_current_progress(project_dir: Path) -> tuple[int, int]:

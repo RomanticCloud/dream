@@ -13,7 +13,9 @@ def is_non_chapter_markdown(file_path: Path) -> bool:
 
 
 def parse_chapter_number(file_path: Path) -> int | None:
-    match = re.match(r"^(\d+)", file_path.stem)
+    stem = file_path.stem
+    # 尝试匹配 "ch01" 或 "01" 格式
+    match = re.match(r"^(?:ch)?(\d+)", stem)
     if not match:
         return None
     return int(match.group(1))
