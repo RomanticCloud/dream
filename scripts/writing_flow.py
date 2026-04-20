@@ -195,45 +195,50 @@ def on_chapter_completed(project_dir: Path, chapter_path: Path, chapter_num: int
     Returns:
         {"status": "success"} 或 {"status": "drift_detected", "issues": [...]}
     """
-    # 1. 提取场景锚点
-    narrative_ctx = NarrativeContext(project_dir)
-    scene_anchor = narrative_ctx.extract_scene_anchor(chapter_path)
-    narrative_summary = narrative_ctx.generate_narrative_summary(chapter_path)
+    try:
+        # 1. 提取场景锚点
+        narrative_ctx = NarrativeContext(project_dir)
+        scene_anchor = narrative_ctx.extract_scene_anchor(chapter_path)
+        narrative_summary = narrative_ctx.generate_narrative_summary(chapter_path)
 
-    # 2. 保存章节上下文
-    narrative_ctx.save_chapter_context(chapter_num, {
-        "scene_anchor": scene_anchor,
-        "narrative_summary": narrative_summary
-    })
+        # 2. 保存章节上下文
+        narrative_ctx.save_chapter_context(chapter_num, {
+            "scene_anchor": scene_anchor,
+            "narrative_summary": narrative_summary
+        })
 
-    # 3. 更新状态跟踪器
-    state_tracker = StateTracker(project_dir)
-    state_tracker.update_character_state(chapter_path)
-    state_tracker.track_plot_threads(chapter_path)
-    state_tracker.track_foreshadowing(chapter_path)
-    state_tracker.update_last_chapter(chapter_num)
+        # 3. 更新状态跟踪器
+        state_tracker = StateTracker(project_dir)
+        state_tracker.update_character_state(chapter_path)
+        state_tracker.track_plot_threads(chapter_path)
+        state_tracker.track_foreshadowing(chapter_path)
+        state_tracker.update_last_chapter(chapter_num)
 
-    # 4. 跨章一致性验证（如果有上一章）
-    if chapter_num > 1:
-        prev_chapter_path = find_chapter_path(project_dir, chapter_num - 1)
-        if prev_chapter_path:
-            validator = EnhancedValidator(project_dir)
-            issues = validator.validate_cross_chapter_consistency(chapter_path, prev_chapter_path)
+        # 4. 跨章一致性验证（如果有上一章）
+        if chapter_num > 1:
+            prev_chapter_path = find_chapter_path(project_dir, chapter_num - 1)
+            if prev_chapter_path:
+                validator = EnhancedValidator(project_dir)
+                issues = validator.validate_cross_chapter_consistency(chapter_path, prev_chapter_path)
 
-            if issues:
-                # 记录漂移问题
-                log_drift_issues(project_dir, chapter_num, issues)
+                if issues:
+                    # 记录漂移问题
+                    log_drift_issues(project_dir, chapter_num, issues)
 
-                # 如果有严重问题，返回警告
-                critical_issues = [i for i in issues if i.severity == "error"]
-                if critical_issues:
-                    return {
-                        "status": "drift_detected",
-                        "issues": critical_issues,
-                        "chapter_num": chapter_num
-                    }
+                    # 如果有严重问题，返回警告
+                    critical_issues = [i for i in issues if i.severity == "error"]
+                    if critical_issues:
+                        return {
+                            "status": "drift_detected",
+                            "issues": critical_issues,
+                            "chapter_num": chapter_num
+                        }
 
-    return {"status": "success"}
+        return {"status": "success"}
+    except Exception as e:
+        # 记录错误但不中断写作流程
+        print(f"警告: 章节完成处理时出错 (章节 {chapter_num}): {e}")
+        return {"status": "success", "warning": str(e)}
 
 
 def main():
