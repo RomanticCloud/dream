@@ -37,8 +37,23 @@ class EnhancedValidator:
         """
         issues = []
 
-        current_content = current_chapter_path.read_text(encoding="utf-8")
-        previous_content = previous_chapter_path.read_text(encoding="utf-8")
+        try:
+            current_content = current_chapter_path.read_text(encoding="utf-8")
+            previous_content = previous_chapter_path.read_text(encoding="utf-8")
+        except FileNotFoundError as e:
+            issues.append(ValidationIssue(
+                severity="error",
+                message=f"章节文件不存在: {e}",
+                suggestion="请检查章节文件路径是否正确"
+            ))
+            return issues
+        except Exception as e:
+            issues.append(ValidationIssue(
+                severity="error",
+                message=f"读取章节文件失败: {e}",
+                suggestion="请检查文件权限和编码"
+            ))
+            return issues
 
         # 1. 检查人物状态一致性
         char_issues = self._check_character_consistency(
@@ -178,33 +193,46 @@ class EnhancedValidator:
         """
         issues = []
 
-        # 加载上一章的承接卡
-        previous_content = previous_chapter_path.read_text(encoding="utf-8")
-        carry_card = extract_section(previous_content, "### 6. 承上启下卡")
-        carry_bullets = extract_bullets(carry_card)
+        try:
+            # 加载上一章的承接卡
+            previous_content = previous_chapter_path.read_text(encoding="utf-8")
+            carry_card = extract_section(previous_content, "### 6. 承上启下卡")
+            carry_bullets = extract_bullets(carry_card)
 
-        # 获取必须接住的内容
-        must_handle = carry_bullets.get("下章必须接住什么", "")
+            # 获取必须接住的内容
+            must_handle = carry_bullets.get("下章必须接住什么", "")
 
-        if not must_handle:
-            return issues  # 没有明确要求，跳过
+            if not must_handle:
+                return issues  # 没有明确要求，跳过
 
-        # 检查当前章是否处理了这些要求
-        current_content = current_chapter_path.read_text(encoding="utf-8")
-        current_body = extract_body(current_content)
+            # 检查当前章是否处理了这些要求
+            current_content = current_chapter_path.read_text(encoding="utf-8")
+            current_body = extract_body(current_content)
 
-        # 简化检查：检查关键词是否在当前章中出现
-        keywords = must_handle.split()
-        found_keywords = [kw for kw in keywords if kw in current_body]
+            # 简化检查：检查关键词是否在当前章中出现
+            keywords = must_handle.split()
+            found_keywords = [kw for kw in keywords if kw in current_body]
 
-        if len(found_keywords) < len(keywords) * 0.5:  # 至少50%的关键词要出现
-            issues.append(
-                ValidationIssue(
-                    severity="warning",
-                    message=f"上一章要求处理的内容可能未在本章充分体现：{must_handle}",
-                    suggestion="请确保本章处理了上一章承接卡中要求的内容",
+            if len(found_keywords) < len(keywords) * 0.5:  # 至少50%的关键词要出现
+                issues.append(
+                    ValidationIssue(
+                        severity="warning",
+                        message=f"上一章要求处理的内容可能未在本章充分体现：{must_handle}",
+                        suggestion="请确保本章处理了上一章承接卡中要求的内容",
+                    )
                 )
-            )
+        except FileNotFoundError as e:
+            issues.append(ValidationIssue(
+                severity="error",
+                message=f"章节文件不存在: {e}",
+                suggestion="请检查章节文件路径是否正确"
+            ))
+        except Exception as e:
+            issues.append(ValidationIssue(
+                severity="error",
+                message=f"读取章节文件失败: {e}",
+                suggestion="请检查文件权限和编码"
+            ))
 
         return issues
 
