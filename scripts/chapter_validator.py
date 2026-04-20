@@ -10,7 +10,8 @@ from pathlib import Path
 from card_parser import CARD_MARKER, BODY_MARKER, extract_body, extract_section, filled_bullet_stats, split_card_line
 from chapter_scan import chapter_file_by_number, latest_chapter
 from check_rules import run_single_chapter_checks
-from common_io import load_project_state
+from common_io import find_chapter_path, load_project_state
+from enhanced_validator import EnhancedValidator
 from revision_state import clear_chapter_revision, set_chapter_revision
 from rule_engine import build_fix_plan
 
@@ -205,6 +206,30 @@ def validate_chapter(
 
     continuity_issues = validate_continuity(content)
     all_issues.extend(continuity_issues)
+
+    # 跨章一致性检查
+    if ch_num and ch_num > 1:
+        prev_chapter_path = find_chapter_path(project_dir, ch_num - 1)
+        if prev_chapter_path:
+            enhanced_validator = EnhancedValidator(project_dir)
+
+            carry_issues = enhanced_validator.check_carry_over_fulfilled(
+                prev_chapter_path, chapter_file
+            )
+            for ei in carry_issues:
+                all_issues.append(ValidationIssue(
+                    type=ei.severity,
+                    message=ei.message
+                ))
+
+            consistency_issues = enhanced_validator.validate_cross_chapter_consistency(
+                chapter_file, prev_chapter_path
+            )
+            for ei in consistency_issues:
+                all_issues.append(ValidationIssue(
+                    type=ei.severity,
+                    message=ei.message
+                ))
 
     has_errors = any(issue.type == "error" for issue in all_issues)
     has_format_error = any(issue.type == "error" and "标记" in issue.message for issue in all_issues)
