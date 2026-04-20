@@ -36,6 +36,10 @@ class NarrativeContext:
         body = extract_body(content)
 
         if len(body) <= word_count:
+            # 即使返回全文，也应从完整句子开始
+            first_period = body.find("。")
+            if 0 < first_period < len(body) - 1:
+                return body[first_period + 1:].strip()
             return body.strip()
 
         anchor = body[-word_count:]
