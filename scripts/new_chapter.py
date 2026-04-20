@@ -21,6 +21,7 @@ from narrative_context import NarrativeContext
 from state_tracker import StateTracker
 from path_rules import chapter_file, draft_prompt_file
 from progress_rules import get_current_progress, get_next_chapter
+from subagent_chapter_generator import SubagentChapterGenerator
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR.parent
@@ -615,17 +616,45 @@ def generate_fallback_prompt(
 """
 
 
+def generate_chapter_with_subagent(
+    project_dir: Path,
+    vol_num: int,
+    ch_num: int,
+    lookback: int = 0
+) -> dict:
+    """使用子代理生成章节
+
+    Args:
+        project_dir: 项目目录
+        vol_num: 卷号
+        ch_num: 章节号
+        lookback: 回溯章节数（0=全部）
+
+    Returns:
+        {
+            "status": "prompt_ready" | "error",
+            "prompt_file": "提示文件路径",
+            "chapters_loaded": 10,
+            "prompt_length": 50000
+        }
+    """
+    generator = SubagentChapterGenerator(project_dir)
+    return generator.dispatch_chapter_generation(vol_num, ch_num, lookback)
+
+
 def main():
     """主函数 - 支持多种参数风格
-    
+
     用法:
-        new_chapter.py <项目目录> [--auto|--prompt-only]
+        new_chapter.py <项目目录> [--auto|--prompt-only|--subagent]
         new_chapter.py <项目目录> [vol] [ch]
-    
+
     示例:
         new_chapter.py .                          # 自动检测下一章
         new_chapter.py . --auto                   # 自动生成模式
         new_chapter.py . --prompt-only            # 仅生成提示
+        new_chapter.py . --subagent               # 子代理模式生成
+        new_chapter.py . --subagent --lookback 5  # 子代理模式，回溯5章
         new_chapter.py . 1 5                      # 生成第1卷第5章
     """
     if len(sys.argv) < 2:
@@ -634,11 +663,14 @@ def main():
         print('选项:')
         print('  --auto           自动生成模式（生成提示供对话使用）')
         print('  --prompt-only    仅生成起草提示，不创建支架')
+        print('  --subagent       使用子代理模式生成章节')
+        print('  --lookback N     回溯章节数（0=全部，默认0）')
         print('  [vol] [ch]       指定卷和章（如: 1 5 表示第1卷第5章）')
         print('')
         print('示例:')
         print('  new_chapter.py .')
         print('  new_chapter.py . --auto')
+        print('  new_chapter.py . --subagent')
         print('  new_chapter.py . 1 5')
         sys.exit(1)
 
@@ -647,36 +679,79 @@ def main():
         print(f"项目目录不存在: {project_dir}")
         sys.exit(1)
 
-    state = load_project_state(project_dir)
-    if not state:
-        print("未找到项目状态文件")
-        sys.exit(1)
-
-    # 解析参数
+    # 解析参数（先解析 --subagent 和 --lookback，因为子代理模式不需要 state）
+    subagent_mode = False
+    lookback = 0
     auto_mode = False
     prompt_only = False
     vol_num = None
     ch_num = None
-    
-    for i, arg in enumerate(sys.argv[2:], start=2):
+
+    args_iter = iter(enumerate(sys.argv[2:], start=2))
+    for i, arg in args_iter:
         if arg == "--auto":
             auto_mode = True
         elif arg == "--prompt-only":
             prompt_only = True
+        elif arg == "--subagent":
+            subagent_mode = True
+        elif arg == "--lookback":
+            try:
+                _, next_val = next(args_iter)
+                lookback = int(next_val)
+            except (StopIteration, ValueError):
+                print("错误：--lookback 需要一个整数参数")
+                sys.exit(1)
         elif arg.isdigit() and vol_num is None:
             vol_num = int(arg)
         elif arg.isdigit() and vol_num is not None and ch_num is None:
             ch_num = int(arg)
-    
+
     # 确定卷和章
     if vol_num is None:
-        # 自动检测进度
+        # 子代理模式也需要先获取进度
+        temp_state = load_project_state(project_dir)
+        if not temp_state:
+            print("未找到项目状态文件")
+            sys.exit(1)
         vol_num, ch_num, vol_name = get_next_chapter(project_dir)
     else:
         if ch_num is None:
             ch_num = 1
         vol_name = f"vol{vol_num:02d}"
-    
+
+    # 子代理模式
+    if subagent_mode:
+        print(f"\n{'='*60}")
+        print(f"子代理模式：生成第{vol_num}卷第{ch_num}章")
+        print(f"{'='*60}\n")
+
+        result = generate_chapter_with_subagent(
+            project_dir,
+            vol_num,
+            ch_num,
+            lookback
+        )
+
+        if result["status"] == "prompt_ready":
+            print(f"✅ 子代理提示已准备就绪")
+            print(f"   - 提示文件: {result['prompt_file']}")
+            print(f"   - 加载章节数: {result['chapters_loaded']}")
+            print(f"   - 提示长度: {result['prompt_length']} 字符")
+            print(f"\n请使用子代理执行以下任务:")
+            print(f"1. 读取提示文件: {result['prompt_file']}")
+            print(f"2. 根据提示生成第{ch_num}章内容")
+            print(f"3. 将生成的内容保存到章节文件")
+        else:
+            print(f"❌ 错误: {result.get('error', '未知错误')}")
+
+        return
+
+    state = load_project_state(project_dir)
+    if not state:
+        print("未找到项目状态文件")
+        sys.exit(1)
+
     print(f"\n{'='*60}")
     print(f"生成第{vol_num}卷第{ch_num}章起草提示")
     print(f"{'='*60}\n")
