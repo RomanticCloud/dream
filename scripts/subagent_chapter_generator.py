@@ -435,3 +435,150 @@ class SubagentChapterGenerator:
 """
 
         return prompt
+
+    def separate_generated_chapter(
+        self,
+        chapter_file: Path,
+        cards_dir: Path,
+    ) -> bool:
+        """自动分离生成的章节内容
+
+        Args:
+            chapter_file: 章节文件路径（包含混合内容）
+            cards_dir: 工作卡保存目录
+
+        Returns:
+            bool: 分离是否成功
+        """
+        if not chapter_file.exists():
+            return False
+
+        # 读取章节内容
+        content = chapter_file.read_text(encoding="utf-8")
+
+        # 查找工作卡标记
+        marker = "## 内部工作卡"
+        idx = content.find(marker)
+
+        if idx == -1:
+            return False
+
+        # 分离内容
+        chapter_content = content[:idx].strip()
+        cards = content[idx:].strip()
+
+        # 确保工作卡目录存在
+        cards_dir.mkdir(exist_ok=True)
+
+        # 保存正文
+        chapter_file.write_text(chapter_content, encoding="utf-8")
+
+        # 保存工作卡
+        card_file = cards_dir / f"{chapter_file.stem}_card.md"
+        card_file.write_text(cards, encoding="utf-8")
+
+        return True
+
+    def verify_separation(
+        self,
+        vol_num: int,
+        ch_num: int,
+    ) -> dict:
+        """验证章节分离是否成功
+
+        Returns:
+            {
+                "content_exists": True/False,
+                "cards_exists": True/False,
+                "content_has_marker": True/False,
+                "cards_valid": True/False,
+                "separated": True/False
+            }
+        """
+        chapter_file = self.project_dir / "chapters" / f"vol{vol_num:02d}" / f"ch{ch_num:02d}.md"
+        card_file = self.project_dir / "chapters" / f"vol{vol_num:02d}" / "cards" / f"ch{ch_num:02d}_card.md"
+
+        result = {
+            "content_exists": chapter_file.exists(),
+            "cards_exists": card_file.exists(),
+            "content_has_marker": False,
+            "cards_valid": False,
+            "separated": False,
+        }
+
+        # 检查正文是否不包含工作卡标记
+        if result["content_exists"]:
+            content = chapter_file.read_text(encoding="utf-8")
+            result["content_has_marker"] = "## 内部工作卡" in content
+
+        # 检查工作卡是否有效
+        if result["cards_exists"]:
+            cards = card_file.read_text(encoding="utf-8")
+            result["cards_valid"] = "## 内部工作卡" in cards
+
+        # 判断是否已分离
+        result["separated"] = (
+            result["content_exists"]
+            and result["cards_exists"]
+            and not result["content_has_marker"]
+            and result["cards_valid"]
+        )
+
+        return result
+
+    def auto_separate_after_generation(
+        self,
+        vol_num: int,
+        ch_num: int,
+    ) -> dict:
+        """生成后自动分离章节内容
+
+        Args:
+            vol_num: 卷号
+            ch_num: 章节号
+
+        Returns:
+            {
+                "status": "success" | "already_separated" | "failed",
+                "message": "状态描述"
+            }
+        """
+        chapter_file = self.project_dir / "chapters" / f"vol{vol_num:02d}" / f"ch{ch_num:02d}.md"
+        cards_dir = self.project_dir / "chapters" / f"vol{vol_num:02d}" / "cards"
+
+        # 先验证当前状态
+        verification = self.verify_separation(vol_num, ch_num)
+
+        if verification["separated"]:
+            return {
+                "status": "already_separated",
+                "message": "章节已分离，无需处理",
+            }
+
+        if not verification["content_exists"]:
+            return {
+                "status": "failed",
+                "message": f"章节文件不存在: {chapter_file}",
+            }
+
+        # 尝试自动分离
+        success = self.separate_generated_chapter(chapter_file, cards_dir)
+
+        if success:
+            # 再次验证
+            verification = self.verify_separation(vol_num, ch_num)
+            if verification["separated"]:
+                return {
+                    "status": "success",
+                    "message": "自动分离成功",
+                }
+            else:
+                return {
+                    "status": "failed",
+                    "message": "分离后验证失败",
+                }
+        else:
+            return {
+                "status": "failed",
+                "message": "未找到'## 内部工作卡'标记，无法分离",
+            }

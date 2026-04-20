@@ -664,7 +664,7 @@ def main():
     """主函数 - 支持多种参数风格
 
     用法:
-        new_chapter.py <项目目录> [--auto|--prompt-only|--subagent]
+        new_chapter.py <项目目录> [--auto|--prompt-only|--subagent|--separate]
         new_chapter.py <项目目录> [vol] [ch]
 
     示例:
@@ -673,15 +673,18 @@ def main():
         new_chapter.py . --prompt-only            # 仅生成提示
         new_chapter.py . --subagent               # 子代理模式生成
         new_chapter.py . --subagent --lookback 5  # 子代理模式，回溯5章
+        new_chapter.py . --separate               # 自动分离章节
         new_chapter.py . 1 5                      # 生成第1卷第5章
     """
-    if len(sys.argv) < 2:
+    # 检查帮助参数
+    if "--help" in sys.argv or "-h" in sys.argv:
         print('用法: new_chapter.py <项目目录> [选项]')
         print('')
         print('选项:')
         print('  --auto           自动生成模式（生成提示供对话使用）')
         print('  --prompt-only    仅生成起草提示，不创建支架')
         print('  --subagent       使用子代理模式生成章节')
+        print('  --separate       自动分离章节内容和工作卡')
         print('  --lookback N     回溯章节数（0=全部，默认0）')
         print('  [vol] [ch]       指定卷和章（如: 1 5 表示第1卷第5章）')
         print('')
@@ -689,6 +692,26 @@ def main():
         print('  new_chapter.py .')
         print('  new_chapter.py . --auto')
         print('  new_chapter.py . --subagent')
+        print('  new_chapter.py . --separate')
+        print('  new_chapter.py . 1 5')
+        sys.exit(0)
+    
+    if len(sys.argv) < 2:
+        print('用法: new_chapter.py <项目目录> [选项]')
+        print('')
+        print('选项:')
+        print('  --auto           自动生成模式（生成提示供对话使用）')
+        print('  --prompt-only    仅生成起草提示，不创建支架')
+        print('  --subagent       使用子代理模式生成章节')
+        print('  --separate       自动分离章节内容和工作卡')
+        print('  --lookback N     回溯章节数（0=全部，默认0）')
+        print('  [vol] [ch]       指定卷和章（如: 1 5 表示第1卷第5章）')
+        print('')
+        print('示例:')
+        print('  new_chapter.py .')
+        print('  new_chapter.py . --auto')
+        print('  new_chapter.py . --subagent')
+        print('  new_chapter.py . --separate')
         print('  new_chapter.py . 1 5')
         sys.exit(1)
 
@@ -699,6 +722,7 @@ def main():
 
     # 解析参数（先解析 --subagent 和 --lookback，因为子代理模式不需要 state）
     subagent_mode = False
+    separate_mode = False
     lookback = 0
     auto_mode = False
     prompt_only = False
@@ -713,6 +737,8 @@ def main():
             prompt_only = True
         elif arg == "--subagent":
             subagent_mode = True
+        elif arg == "--separate":
+            separate_mode = True
         elif arg == "--lookback":
             try:
                 _, next_val = next(args_iter)
@@ -763,6 +789,28 @@ def main():
             print(f"4. 分离输出正文和工作卡到指定路径")
         else:
             print(f"❌ 错误: {result.get('error', '未知错误')}")
+
+        return
+
+    # 自动分离模式
+    if separate_mode:
+        print(f"\n{'='*60}")
+        print(f"自动分离模式：分离第{vol_num}卷第{ch_num}章")
+        print(f"{'='*60}\n")
+
+        generator = SubagentChapterGenerator(project_dir)
+        result = generator.auto_separate_after_generation(vol_num, ch_num)
+
+        if result["status"] == "success":
+            print(f"✅ {result['message']}")
+            chapter_file = project_dir / "chapters" / f"vol{vol_num:02d}" / f"ch{ch_num:02d}.md"
+            card_file = project_dir / "chapters" / f"vol{vol_num:02d}" / "cards" / f"ch{ch_num:02d}_card.md"
+            print(f"   - 正文文件: {chapter_file}")
+            print(f"   - 工作卡文件: {card_file}")
+        elif result["status"] == "already_separated":
+            print(f"✅ {result['message']}")
+        else:
+            print(f"❌ {result['message']}")
 
         return
 
