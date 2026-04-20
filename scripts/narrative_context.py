@@ -39,7 +39,9 @@ class NarrativeContext:
             # 即使返回全文，也应从完整句子开始
             first_period = body.find("。")
             if 0 < first_period < len(body) - 1:
-                return body[first_period + 1:].strip()
+                remainder = body[first_period + 1:].strip()
+                if remainder:  # 确保非空
+                    return remainder
             return body.strip()
 
         anchor = body[-word_count:]
@@ -47,7 +49,9 @@ class NarrativeContext:
         # 找到第一个句号，从完整句子开始
         first_period = anchor.find("。")
         if first_period > 0:
-            anchor = anchor[first_period + 1:]
+            remainder = anchor[first_period + 1:].strip()
+            if remainder:  # 确保非空
+                return remainder
 
         return anchor.strip()
 
