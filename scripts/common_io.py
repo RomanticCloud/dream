@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Common state and reference IO helpers for dream scripts."""
+"""Common state and reference IO helpers for dream scripts.
+
+Note: This module provides general-purpose utilities for the context optimization system.
+For chapter card parsing specifically, see card_parser.py which has specialized functions
+for the existing chapter format.
+"""
 
 from __future__ import annotations
 
@@ -31,7 +36,6 @@ def load_volume_outline(project_dir: Path, volume_index: int) -> dict:
         return {}
 
     text = outline_path.read_text(encoding="utf-8")
-    import re
 
     pattern = rf"(^##\s+第{volume_index}卷.+?)(?=^##\s+|\Z)"
     match = re.search(pattern, text, re.M | re.S)
@@ -60,6 +64,18 @@ def save_json_file(file_path: Path, payload: dict | list) -> None:
 
 
 def extract_body(content: str) -> str:
+    """从章节内容中提取正文部分
+    
+    与 card_parser.py 的 extract_body 区别：
+    - card_parser: 查找"## 正文"标记
+    - 本函数: 查找"## 内部工作卡"标记
+    
+    Args:
+        content: 完整章节内容
+    
+    Returns:
+        正文内容（不包含标题和内部工作卡）
+    """
     marker = "## 内部工作卡"
     idx = content.find(marker)
     if idx != -1:
@@ -80,6 +96,19 @@ def extract_body(content: str) -> str:
 
 
 def extract_section(content: str, section_title: str) -> str:
+    """从章节内容中提取指定章节
+    
+    与 card_parser.py 的 extract_section 区别：
+    - card_parser: 查找"### "作为停止标记
+    - 本函数: 使用动态 heading level 检测停止位置
+    
+    Args:
+        content: 完整章节内容
+        section_title: 章节标题，如 "### 1. 状态卡"
+    
+    Returns:
+        章节内容（不包含标题），未找到时返回空字符串
+    """
     heading_level = len(section_title) - len(section_title.lstrip("#"))
     pattern = rf"^{re.escape(section_title)}\s*$"
     match = re.search(pattern, content, re.M)
@@ -95,8 +124,20 @@ def extract_section(content: str, section_title: str) -> str:
     return rest.strip()
 
 
-def extract_bullets(section_content: str) -> dict:
-    result = {}
+def extract_bullets(section_content: str) -> dict[str, str]:
+    """从章节内容中提取要点列表
+    
+    与 card_parser.py 的 extract_bullets 区别：
+    - card_parser: 过滤掉占位符值（"（待填）"、"[更新]"）
+    - 本函数: 不过滤任何值
+    
+    Args:
+        section_content: 章节内容
+    
+    Returns:
+        要点字典，格式 {"要点1": "内容", "要点2": "内容"}
+    """
+    result: dict[str, str] = {}
     for line in section_content.splitlines():
         line = line.strip()
         m = re.match(r"^-\s+(.+?)[：:]\s*(.+)$", line)
@@ -105,8 +146,16 @@ def extract_bullets(section_content: str) -> dict:
     return result
 
 
-def extract_all_bullets(section_content: str) -> list:
-    bullets = []
+def extract_all_bullets(section_content: str) -> list[str]:
+    """从章节内容中提取所有要点
+    
+    Args:
+        section_content: 章节内容
+    
+    Returns:
+        要点列表，不解析键值对
+    """
+    bullets: list[str] = []
     for line in section_content.splitlines():
         line = line.strip()
         if line.startswith("- "):
