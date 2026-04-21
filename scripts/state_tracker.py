@@ -16,6 +16,7 @@ from common_io import (
     load_json_file,
     save_json_file,
 )
+from global_clock import GlobalClock
 
 
 class StateTracker:
@@ -24,6 +25,7 @@ class StateTracker:
         self.context_dir = project_dir / "context"
         self.context_dir.mkdir(exist_ok=True)
         self.state_file = self.context_dir / "state_tracker.json"
+        self.global_clock = GlobalClock(project_dir)
         self._load_state()
 
     def _load_state(self):
@@ -279,9 +281,60 @@ class StateTracker:
                     f"- {foreshadow['content']} (埋于{foreshadow['planted_chapter']})"
                 )
 
+        # 添加时间轴摘要
+        time_summary = self.get_time_summary()
+        if time_summary:
+            summary_parts.insert(0, f"## 当前时间: {time_summary}\n")
+
         return "\n".join(summary_parts)
 
     def update_last_chapter(self, chapter_num: int):
         """更新最后处理的章节号"""
         self.state["last_updated_chapter"] = chapter_num
         self._save_state()
+
+    def update_global_time(self, chapter_path: Path, chapter_num: int) -> dict:
+        """更新全局时间轴
+
+        从状态卡中提取时间流逝和时间点，推进全局时钟
+
+        Args:
+            chapter_path: 章节文件路径
+            chapter_num: 章节号
+
+        Returns:
+            更新后的当前时间字典
+        """
+        content = chapter_path.read_text(encoding="utf-8")
+
+        # 从状态卡提取时间信息
+        status_card = extract_section(content, "### 1. 状态卡")
+        status_bullets = extract_bullets(status_card)
+
+        elapsed = status_bullets.get("本章时间流逝", "")
+        time_point = status_bullets.get("本章结束时时间点", "")
+
+        if not elapsed or not time_point:
+            # 没有时间信息，跳过
+            return self.global_clock.get_status()["current"]
+
+        chapter_id = f"ch{chapter_num:02d}"
+
+        try:
+            result = self.global_clock.advance(elapsed, time_point, chapter_id)
+            return result
+        except Exception as e:
+            # 时间推进失败，记录但不中断
+            print(f"⚠️ 时间推进失败: {e}")
+            return self.global_clock.get_status()["current"]
+
+    def get_time_summary(self) -> str:
+        """获取时间轴摘要"""
+        status = self.global_clock.get_status()
+        current = status["current"]
+
+        summary = f"当前时间: {current['description']}"
+        if status["last_chapter"]:
+            summary += f" (更新于 {status['last_chapter']['id']})"
+
+        return summary
