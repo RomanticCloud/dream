@@ -23,6 +23,7 @@ from state_tracker import StateTracker
 from path_rules import chapter_file, draft_prompt_file
 from progress_rules import get_current_progress, get_next_chapter
 from subagent_chapter_generator import SubagentChapterGenerator
+from global_clock import GlobalClock
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR.parent
@@ -505,6 +506,42 @@ def generate_dynamic_content(
     return prompt
 
 
+def get_formatted_time(project_dir: Path) -> str:
+    """获取格式化的当前时间
+    
+    从 GLOBAL_CLOCK.json 读取当前时间，转换为自然语言格式
+    
+    Args:
+        project_dir: 项目目录
+        
+    Returns:
+        格式化的时间字符串，如 "2024年4月21日，傍晚"
+    """
+    clock = GlobalClock(project_dir)
+    status = clock.get_status()
+    current = status["current"]
+    
+    # 提取时间组件
+    year = current["year"]
+    month = current["month"]
+    day = current["day"]
+    hour = current.get("hour", 0)
+    
+    # 时段判断
+    if 5 <= hour < 11:
+        time_of_day = "清晨"
+    elif 11 <= hour < 14:
+        time_of_day = "正午"
+    elif 14 <= hour < 18:
+        time_of_day = "下午"
+    elif 18 <= hour < 21:
+        time_of_day = "傍晚"
+    else:
+        time_of_day = "深夜"
+    
+    return f"{year}年{month}月{day}日，{time_of_day}"
+
+
 def generate_draft_prompt(
     project_dir: Path,
     vol_num: int,
@@ -554,6 +591,19 @@ def generate_draft_prompt(
     else:
         # 如果找不到标记，在文件末尾追加
         full_prompt = template + "\n\n" + dynamic_content
+    
+    # 注入时间 System Prompt（最顶部）
+    try:
+        formatted_time = get_formatted_time(project_dir)
+        system_time_requirement = f"""【系统强制设定】
+当前绝对时间为：{formatted_time}。
+请确保本章的景物描写、人物作息符合此时间点。
+
+"""
+        full_prompt = system_time_requirement + full_prompt
+    except Exception as e:
+        # 如果时间获取失败，记录但不中断
+        print(f"⚠️ 警告：无法获取当前时间: {e}")
     
     return full_prompt
 
