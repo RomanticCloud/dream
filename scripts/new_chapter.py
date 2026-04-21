@@ -706,6 +706,19 @@ def validate_chapter_interactive(
                 if card_file.exists():
                     clock.advance_from_card(card_file, vol_num, ch_num)
                     print(f"✅ 时间轴已推进")
+                    
+                    # 记录里程碑
+                    try:
+                        content = card_file.read_text(encoding="utf-8")
+                        plot_card = extract_section(content, "### 2. 情节卡")
+                        if plot_card:
+                            events = re.findall(r'[\d]+\.\s*(.+?)(?=\n|$)', plot_card)
+                            if events:
+                                milestone_event = events[0].strip()
+                                clock.add_milestone(milestone_event, f"ch{ch_num:02d}")
+                                print(f"✅ 里程碑已记录: {milestone_event[:50]}...")
+                    except Exception as e:
+                        print(f"⚠️ 里程碑记录失败: {e}")
                 else:
                     print(f"⚠️ 卡片文件不存在，跳过时间轴推进")
             except Exception as e:
@@ -876,6 +889,25 @@ def main():
     if not project_dir.exists():
         print(f"项目目录不存在: {project_dir}")
         sys.exit(1)
+
+    # 检测项目配置，如果没有则启动初始化向导
+    state = load_project_state(project_dir)
+    if not state or not state.get("basic_specs"):
+        print(f"\n{'='*60}")
+        print("【项目初始化】")
+        print(f"{'='*60}")
+        print("未检测到项目配置，启动初始化向导...\n")
+        
+        import subprocess
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_DIR / "init_wizard.py"), str(project_dir)],
+            capture_output=False
+        )
+        if result.returncode != 0:
+            print("❌ 初始化失败")
+            sys.exit(1)
+        print("\n✅ 初始化完成，请重新运行命令")
+        sys.exit(0)
 
     # 解析参数（先解析 --subagent 和 --lookback，因为子代理模式不需要 state）
     subagent_mode = False

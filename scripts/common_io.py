@@ -13,6 +13,57 @@ import re
 from pathlib import Path
 
 
+def parse_date(text: str) -> tuple[int, int, int]:
+    """解析日期文本为 (year, month, day)
+    
+    Args:
+        text: 日期文本，如 "2024-04-21" 或 "2024年4月21日"
+        
+    Returns:
+        (year, month, day) 元组
+        
+    Raises:
+        ValueError: 无法解析日期
+    """
+    patterns = [
+        (r"(\d{4})-(\d{1,2})-(\d{1,2})", (int, int, int)),
+        (r"(\d{4})年(\d{1,2})月(\d{1,2})日", (int, int, int)),
+        (r"(\d{4})年(\d{1,2})月", (int, int, None)),
+    ]
+    
+    for pattern, _ in patterns:
+        match = re.search(pattern, text)
+        if match:
+            groups = match.groups()
+            year = int(groups[0])
+            month = int(groups[1])
+            day = int(groups[2]) if groups[2] else 1
+            return year, month, day
+    
+    raise ValueError(f"无法解析日期: {text}")
+
+
+def format_time_period(hour: int) -> str:
+    """根据小时返回时段描述
+    
+    Args:
+        hour: 小时 (0-23)
+        
+    Returns:
+        时段描述：清晨/正午/下午/傍晚/深夜
+    """
+    if 5 <= hour < 11:
+        return "清晨"
+    elif 11 <= hour < 14:
+        return "正午"
+    elif 14 <= hour < 18:
+        return "下午"
+    elif 18 <= hour < 21:
+        return "傍晚"
+    else:
+        return "深夜"
+
+
 def load_project_state(project_dir: Path) -> dict:
     state_file = project_dir / "wizard_state.json"
     if state_file.exists():

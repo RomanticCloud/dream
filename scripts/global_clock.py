@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from common_io import load_json_file, save_json_file, extract_section, extract_bullets
+from common_io import load_json_file, save_json_file, extract_section, extract_bullets, parse_date
 
 
 class TimeError(ValueError):
@@ -108,23 +108,15 @@ class GlobalClock:
         return clock
 
     def _parse_date(self, text: str) -> tuple[int, int, int]:
-        """解析日期文本"""
-        patterns = [
-            (r"(\d{4})-(\d{1,2})-(\d{1,2})", (int, int, int)),
-            (r"(\d{4})年(\d{1,2})月(\d{1,2})日", (int, int, int)),
-            (r"(\d{4})年(\d{1,2})月", (int, int, None)),
-        ]
+        """解析日期文本
 
-        for pattern, _ in patterns:
-            match = re.search(pattern, text)
-            if match:
-                groups = match.groups()
-                year = int(groups[0])
-                month = int(groups[1])
-                day = int(groups[2]) if groups[2] else 1
-                return year, month, day
-
-        raise TimeError(f"无法解析日期: {text}")
+        Returns:
+            (year, month, day) 元组
+        """
+        try:
+            return parse_date(text)
+        except ValueError as e:
+            raise TimeError(str(e))
 
     def _to_datetime(self, time_dict: dict) -> datetime:
         """将时间字典转换为datetime对象"""
