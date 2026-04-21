@@ -16,6 +16,7 @@ from pathlib import Path
 from datetime import datetime
 
 from card_parser import extract_section, extract_bullets
+from chapter_validator import validate_chapter, print_result, fix_time_logic_and_revalidate
 from common_io import load_project_state, load_volume_outline
 from narrative_context import NarrativeContext
 from state_tracker import StateTracker
@@ -616,6 +617,87 @@ def generate_fallback_prompt(
 """
 
 
+def validate_chapter_interactive(
+    project_dir: Path,
+    vol_num: int,
+    ch_num: int,
+    max_retries: int = 3,
+    auto_fix: bool = False
+) -> bool:
+    """验证章节，失败时自动修复或询问是否重生成
+
+    Args:
+        project_dir: 项目目录
+        vol_num: 卷号
+        ch_num: 章节号
+        max_retries: 最大重试次数
+        auto_fix: 是否自动修复时间逻辑问题
+
+    Returns:
+        True if validation passed, False if user gave up
+    """
+    for attempt in range(1, max_retries + 1):
+        print(f"\n{'='*50}")
+        print(f"第 {attempt}/{max_retries} 次验证")
+        print(f"{'='*50}")
+
+        result = validate_chapter(project_dir, vol_num, ch_num)
+        print_result(result)
+
+        if result.passed:
+            print(f"✅ 第{attempt}次尝试通过")
+            return True
+
+        # 自动修复时间逻辑问题
+        if auto_fix:
+            print(f"\n【自动修复】尝试修复时间逻辑问题...")
+            fixed, remaining_issues = fix_time_logic_and_revalidate(project_dir, vol_num, ch_num)
+            if fixed:
+                print(f"✅ 时间逻辑问题已修复")
+                result2 = validate_chapter(project_dir, vol_num, ch_num)
+                if result2.passed:
+                    print_result(result2)
+                    print(f"✅ 修复后验证通过")
+                    return True
+            elif remaining_issues:
+                print(f"⚠ 仍有问题需要处理:")
+                for issue in remaining_issues:
+                    print(f"  - {issue.message}")
+
+        # 打印高严重度问题
+        if result.fix_plan:
+            if result.fix_plan.get("total_regenerate", 0) > 0:
+                print("\n【高严重度问题】需整章重写:")
+                for item in result.fix_plan["regenerate"]:
+                    print(f"  - {item['name']}: {item['details']}")
+            if result.fix_plan.get("total_polish", 0) > 0:
+                print("\n【低严重度问题】AI润色:")
+                for item in result.fix_plan["ai_polish"]:
+                    print(f"  - {item['name']}: {item['details']}")
+
+        # 询问用户
+        if attempt < max_retries:
+            print(f"\n❌ 第{attempt}次验证失败")
+            try:
+                choice = input("是否重生成? (y/n/c=continue anyway): ").strip().lower()
+            except EOFError:
+                choice = 'n'
+                print("(输入不可用，默认选择n)")
+
+            if choice == 'n':
+                print("用户放弃")
+                return False
+            elif choice == 'c':
+                print("用户选择继续")
+                return False
+            # y: 继续循环重生成
+        else:
+            print(f"\n❌ 达到最大重试次数({max_retries})")
+            return False
+
+    return False
+
+
 def generate_chapter_with_subagent(
     project_dir: Path,
     vol_num: int,
@@ -673,6 +755,8 @@ def main():
         new_chapter.py . --prompt-only            # 仅生成提示
         new_chapter.py . --subagent               # 子代理模式生成
         new_chapter.py . --subagent --lookback 5  # 子代理模式，回溯5章
+        new_chapter.py . --subagent --auto-validate  # 子代理模式+自动验证
+        new_chapter.py . --subagent --auto-validate --max-retries 5  # 最多重试5次
         new_chapter.py . --separate               # 自动分离章节
         new_chapter.py . 1 5                      # 生成第1卷第5章
     """
@@ -681,36 +765,42 @@ def main():
         print('用法: new_chapter.py <项目目录> [选项]')
         print('')
         print('选项:')
-        print('  --auto           自动生成模式（生成提示供对话使用）')
-        print('  --prompt-only    仅生成起草提示，不创建支架')
-        print('  --subagent       使用子代理模式生成章节')
-        print('  --separate       自动分离章节内容和工作卡')
-        print('  --lookback N     回溯章节数（0=全部，默认0）')
-        print('  [vol] [ch]       指定卷和章（如: 1 5 表示第1卷第5章）')
+        print('  --auto              自动生成模式（生成提示供对话使用）')
+        print('  --prompt-only       仅生成起草提示，不创建支架')
+        print('  --subagent          使用子代理模式生成章节')
+        print('  --separate          自动分离章节内容和工作卡')
+        print('  --lookback N        回溯章节数（0=全部，默认0）')
+        print('  --auto-validate     生成后自动验证章节质量')
+        print('  --max-retries N     验证失败最大重试次数（默认3）')
+        print('  [vol] [ch]          指定卷和章（如: 1 5 表示第1卷第5章）')
         print('')
         print('示例:')
         print('  new_chapter.py .')
         print('  new_chapter.py . --auto')
         print('  new_chapter.py . --subagent')
+        print('  new_chapter.py . --subagent --auto-validate')
         print('  new_chapter.py . --separate')
         print('  new_chapter.py . 1 5')
         sys.exit(0)
-    
+
     if len(sys.argv) < 2:
         print('用法: new_chapter.py <项目目录> [选项]')
         print('')
         print('选项:')
-        print('  --auto           自动生成模式（生成提示供对话使用）')
-        print('  --prompt-only    仅生成起草提示，不创建支架')
-        print('  --subagent       使用子代理模式生成章节')
-        print('  --separate       自动分离章节内容和工作卡')
-        print('  --lookback N     回溯章节数（0=全部，默认0）')
-        print('  [vol] [ch]       指定卷和章（如: 1 5 表示第1卷第5章）')
+        print('  --auto              自动生成模式（生成提示供对话使用）')
+        print('  --prompt-only       仅生成起草提示，不创建支架')
+        print('  --subagent          使用子代理模式生成章节')
+        print('  --separate          自动分离章节内容和工作卡')
+        print('  --lookback N        回溯章节数（0=全部，默认0）')
+        print('  --auto-validate     生成后自动验证章节质量')
+        print('  --max-retries N     验证失败最大重试次数（默认3）')
+        print('  [vol] [ch]          指定卷和章（如: 1 5 表示第1卷第5章）')
         print('')
         print('示例:')
         print('  new_chapter.py .')
         print('  new_chapter.py . --auto')
         print('  new_chapter.py . --subagent')
+        print('  new_chapter.py . --subagent --auto-validate')
         print('  new_chapter.py . --separate')
         print('  new_chapter.py . 1 5')
         sys.exit(1)
@@ -726,6 +816,8 @@ def main():
     lookback = 0
     auto_mode = False
     prompt_only = False
+    auto_validate = False
+    max_retries = 3
     vol_num = None
     ch_num = None
 
@@ -745,6 +837,15 @@ def main():
                 lookback = int(next_val)
             except (StopIteration, ValueError):
                 print("错误：--lookback 需要一个整数参数")
+                sys.exit(1)
+        elif arg == "--auto-validate":
+            auto_validate = True
+        elif arg == "--max-retries":
+            try:
+                _, next_val = next(args_iter)
+                max_retries = int(next_val)
+            except (StopIteration, ValueError):
+                print("错误：--max-retries 需要一个整数参数")
                 sys.exit(1)
         elif arg.isdigit() and vol_num is None:
             vol_num = int(arg)
@@ -787,6 +888,23 @@ def main():
             print(f"2. 根据提示中的文件路径读取前文章节（正文+工作卡）")
             print(f"3. 生成第{ch_num}章内容")
             print(f"4. 分离输出正文和工作卡到指定路径")
+
+            if auto_validate:
+                print(f"\n{'='*60}")
+                print(f"【自动验证模式】")
+                print(f"{'='*60}")
+                print("生成完成后，将自动验证章节质量...")
+                print("验证失败会询问是否重生成（最多重试{}次）".format(max_retries))
+
+                # 自动验证
+                validation_passed = validate_chapter_interactive(
+                    project_dir, vol_num, ch_num, max_retries, auto_fix=True
+                )
+
+                if validation_passed:
+                    print(f"\n✅ 章节验证通过！")
+                else:
+                    print(f"\n⚠️ 章节验证未通过，请检查生成内容")
         else:
             print(f"❌ 错误: {result.get('error', '未知错误')}")
 

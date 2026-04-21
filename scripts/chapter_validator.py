@@ -14,6 +14,7 @@ from common_io import find_chapter_path, load_project_state
 from enhanced_validator import EnhancedValidator
 from revision_state import clear_chapter_revision, set_chapter_revision
 from rule_engine import build_fix_plan
+from time_logic_checker import check_all_logic as check_time_logic, apply_fixes as apply_time_logic_fixes, TimeLogicIssue
 
 
 REQUIRED_CARD_HEADERS = [
@@ -21,7 +22,7 @@ REQUIRED_CARD_HEADERS = [
     "### 2. 情节卡",
     "### 3. 资源卡",
     "### 4. 关系卡",
-    "### 5. 情感弧卡",
+    "### 5. 情绪弧线卡",
     "### 6. 承上启下卡",
 ]
 
@@ -193,6 +194,13 @@ def validate_chapter(
 
     content = chapter_file.read_text(encoding="utf-8")
 
+    # 支持分离架构：如果正文文件缺少卡片，尝试读取 cards 目录
+    if CARD_MARKER not in content:
+        card_file = chapter_file.parent / "cards" / f"ch{ch_num:02d}_card.md"
+        if card_file.exists():
+            card_content = card_file.read_text(encoding="utf-8")
+            content = content.rstrip() + "\n\n" + card_content
+
     all_issues = []
 
     format_issues = validate_format(content)
@@ -206,6 +214,15 @@ def validate_chapter(
 
     continuity_issues = validate_continuity(content)
     all_issues.extend(continuity_issues)
+
+    # 时间逻辑检查
+    body = extract_body(content)
+    time_logic_issues = check_time_logic(body)
+    for tli in time_logic_issues:
+        all_issues.append(ValidationIssue(
+            type=tli.severity,
+            message=f"[时间逻辑] {tli.message}"
+        ))
 
     # 跨章一致性检查
     if ch_num and ch_num > 1:
@@ -262,6 +279,43 @@ def validate_chapter(
     )
 
 
+def fix_time_logic_and_revalidate(
+    project_dir: Path,
+    vol_num: int,
+    ch_num: int,
+    threshold_factor: float = 0.85
+) -> tuple[bool, list[TimeLogicIssue]]:
+    """自动修复时间逻辑问题并重新验证
+
+    Returns:
+        (fixed: bool, remaining_issues: list)
+    """
+    chapter_file = chapter_file_by_number(project_dir, vol_num, ch_num)
+    if not chapter_file or not chapter_file.exists():
+        return False, []
+
+    from card_parser import extract_body
+    content = chapter_file.read_text(encoding="utf-8")
+    body = extract_body(content)
+
+    issues = check_time_logic(body)
+    if not issues:
+        return True, []
+
+    fixed_body = apply_time_logic_fixes(body, issues)
+    fixed_content = content.replace(body, fixed_body)
+
+    card_file = chapter_file.parent / "cards" / f"ch{ch_num:02d}_card.md"
+    if card_file.exists():
+        card_content = card_file.read_text(encoding="utf-8")
+        fixed_content = fixed_content.rstrip() + "\n\n" + card_content
+
+    chapter_file.write_text(fixed_content, encoding="utf-8")
+
+    new_issues = check_time_logic(extract_body(fixed_content))
+    return len(new_issues) == 0, new_issues
+
+
 def print_result(result: ValidationResult):
     """打印验证结果"""
     print(f"\n{'='*50}")
@@ -287,6 +341,7 @@ def print_result(result: ValidationResult):
 
 def main():
     import argparse
+    import json
     parser = argparse.ArgumentParser(description="章节验证器")
     parser.add_argument("project_dir", nargs="?", default=".", help="项目目录")
     parser.add_argument("vol", nargs="?", type=int, help="卷号")

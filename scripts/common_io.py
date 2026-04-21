@@ -160,15 +160,26 @@ def find_chapter_path(project_dir: Path, chapter_num: int) -> Path | None:
     state_file = project_dir / "wizard_state.json"
     if state_file.exists():
         state = json.loads(state_file.read_text(encoding="utf-8"))
-        arch = state.get("volume_architecture", {})
-        chapters_per_volume = arch.get("chapters_per_volume", 10)
+        specs = state.get("basic_specs", {})
+        chapters_per_volume = specs.get("chapters_per_volume", 10)
 
     vol_num = (chapter_num - 1) // chapters_per_volume + 1
     vol_name = f"vol{vol_num:02d}"
-    chapter_file = project_dir / "chapters" / vol_name / f"{chapter_num:03d}_第{chapter_num}章.md"
-
-    if chapter_file.exists():
-        return chapter_file
+    chapters_dir = project_dir / "chapters" / vol_name
+    
+    # 尝试多种文件命名格式
+    patterns = [
+        f"ch{chapter_num:02d}.md",
+        f"{chapter_num:03d}_第{chapter_num}章.md",
+        f"chapter_{chapter_num:02d}.md",
+        f"{chapter_num}.md",
+    ]
+    
+    for pattern in patterns:
+        chapter_file = chapters_dir / pattern
+        if chapter_file.exists():
+            return chapter_file
+    
     return None
 
 

@@ -204,7 +204,16 @@ class SubagentChapterGenerator:
    - 不得出现与前文矛盾的设定
    - 不得遗忘前文埋下的伏笔
    - 不得突变人物性格或关系
-   - 不得出现AI痕迹（如"小明微微一笑"、"张三若有所思"等模式化表达）
+   - 不得出现AI痕迹（如"微微一笑"、"若有所思"等模式化表达）
+
+## 输出质量标准
+
+1. **字数达标**：正文字数 3500-4500字（低于 2975 字直接失败）
+2. **人物一致性**：与前文状态卡保持一致
+3. **结构完整**：6张工作卡填写率 > 50%
+4. **算数逻辑**：章节内的数字计算必须自洽
+5. **章节自指**：不得出现"本章"、"本章中"等自指词汇
+6. **无AI痕迹**：不得出现"微微一笑"、"若有所思"、"喃喃自语道"等模式化表达
 
 请生成完整的第{ch_num}章内容，包含标题、正文和工作卡。
 """
@@ -335,16 +344,17 @@ class SubagentChapterGenerator:
             card_files.append(f"chapters/vol{vol_num:02d}/cards/ch{i:02d}_card.md")
 
         # 生成文件路径列表
+        project_path = str(self.project_dir)
         content_files_list = "\n".join(
-            f"- /home/ubuntu/social-system-daily/{f}" for f in content_files
+            f"- {project_path}/{f}" for f in content_files
         )
         card_files_list = "\n".join(
-            f"- /home/ubuntu/social-system-daily/{f}" for f in card_files
+            f"- {project_path}/{f}" for f in card_files
         )
 
         # 输出路径
-        content_output = f"/home/ubuntu/social-system-daily/chapters/vol{vol_num:02d}/ch{ch_num:02d}.md"
-        card_output = f"/home/ubuntu/social-system-daily/chapters/vol{vol_num:02d}/cards/ch{ch_num:02d}_card.md"
+        content_output = f"{project_path}/chapters/vol{vol_num:02d}/ch{ch_num:02d}.md"
+        card_output = f"{project_path}/chapters/vol{vol_num:02d}/cards/ch{ch_num:02d}_card.md"
 
         # 生成提示
         prompt = f"""# 章节生成任务
@@ -383,12 +393,12 @@ class SubagentChapterGenerator:
    - 发展故事主线
 
 3. **格式要求**
-   - 使用标准章节格式：`# 第{ch_num}章 标题`
-   - 正文部分
+   - 章节标题：`# 第{ch_num}章 标题`
+   - **正文部分前必须有 `## 正文` 标记**
    - `## 内部工作卡` 标记
    - 六张工作卡（每张用 `### N. 卡片名` 标记）
 
-4. **工作卡格式**
+4. **工作卡格式**（必须完整填写每个字段）
 
    ### 1. 状态卡
    - 主角当前位置：
@@ -429,9 +439,49 @@ class SubagentChapterGenerator:
 请生成完整的第{ch_num}章内容，并分离输出：
 
 1. **正文**保存到：`{content_output}`
+   - 正文必须包含 `## 正文` 标记
 2. **工作卡**保存到：`{card_output}`
 
 注意：工作卡必须使用 `## 内部工作卡` 标记开始。
+
+## 字数控制（严格遵守）
+- 正文字数统计范围：从 `## 正文` 到 `## 内部工作卡` 之间的内容
+- **目标中间值：4000字**
+- **允许范围：3500-4500字**
+- **超出5000字（即4500+500）：必须压缩章节内容后重新检查**
+- **低于3000字（即3500-500）：必须扩展增加对话和细节**
+
+## 质量标准
+
+1. **字数达标**：正文字数必须在3500-4500之间（超出5000字或低于3000字需重新生成）
+2. **人物一致性**：与前文状态卡保持一致
+3. **结构完整**：6张工作卡每张的每个字段都必须填写完整
+4. **算数逻辑**：章节内的数字计算必须自洽
+5. **章节自指**：不得出现"本章"、"本章中"等自指词汇
+6. **无AI痕迹**：不得出现"微微一笑"、"若有所思"、"喃喃自语道"等模式化表达
+
+## 生成后自检（必须执行）
+
+生成章节后、输出前，必须进行以下自检：
+
+1. **时间词一致性检查**：
+   - 同一时间跨度必须一致（如"三个月"不能变成"大半年"）
+   - 倒计时必须每章递减
+
+2. **因果链检查**：
+   - "公司倒闭/老板跑路" → 不能有"赔偿金"
+   - "被裁员" → 有赔偿金
+   - "跳槽" → 主动离职，不能写被裁员
+
+3. **人物位置检查**：
+   - "离开/走了" → 后续不能再出现该人物
+   - 检测到矛盾立即修正后再输出
+
+4. **数字合理性检查**：
+   - 赔偿金 = 月薪 × 月数
+   - 金额来源必须可追溯
+
+发现问题立即修正，再输出最终版本。
 """
 
         return prompt
