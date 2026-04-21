@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from common_io import load_json_file, save_json_file
+from common_io import load_json_file, save_json_file, extract_section, extract_bullets
 
 
 class TimeError(ValueError):
@@ -357,6 +357,43 @@ class GlobalClock:
             )
 
         return True, ""
+
+    def advance_from_card(self, card_file: Path, vol_num: int, ch_num: int) -> dict:
+        """从卡片文件读取时间信息并推进时间轴
+
+        Args:
+            card_file: 卡片文件路径
+            vol_num: 卷号
+            ch_num: 章号
+
+        Returns:
+            更新后的当前时间字典
+
+        Raises:
+            TimeError: 时间推进失败
+        """
+        if not card_file.exists():
+            raise TimeError(f"卡片文件不存在: {card_file}")
+
+        content = card_file.read_text(encoding="utf-8")
+
+        # 从状态卡提取时间信息
+        status_card = extract_section(content, "### 1. 状态卡")
+        if not status_card:
+            raise TimeError("卡片中未找到状态卡")
+
+        bullets = extract_bullets(status_card)
+
+        elapsed = bullets.get("本章时间流逝", "")
+        time_point = bullets.get("本章结束时时间点", "")
+
+        if not elapsed:
+            raise TimeError("状态卡中未找到'本章时间流逝'")
+        if not time_point:
+            raise TimeError("状态卡中未找到'本章结束时时间点'")
+
+        chapter_id = f"ch{ch_num:02d}"
+        return self.advance(elapsed, time_point, chapter_id)
 
     def get_status(self) -> dict:
         """获取当前时间状态"""

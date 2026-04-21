@@ -696,6 +696,23 @@ def validate_chapter_interactive(
 
         if result.passed:
             print(f"✅ 第{attempt}次尝试通过")
+            
+            # 验证通过后，立即推进时间轴
+            print(f"\n【时间轴推进】")
+            try:
+                from global_clock import GlobalClock
+                clock = GlobalClock(project_dir)
+                card_file = project_dir / "chapters" / f"vol{vol_num:02d}" / "cards" / f"ch{ch_num:02d}_card.md"
+                if card_file.exists():
+                    clock.advance_from_card(card_file, vol_num, ch_num)
+                    print(f"✅ 时间轴已推进")
+                else:
+                    print(f"⚠️ 卡片文件不存在，跳过时间轴推进")
+            except Exception as e:
+                print(f"❌ 时间轴推进失败: {e}")
+                print("由于时间轴推进失败，阻止继续")
+                return False
+            
             return True
 
         # 自动修复时间逻辑问题

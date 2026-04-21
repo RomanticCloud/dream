@@ -61,6 +61,50 @@ def validate_format(content: str) -> list[ValidationIssue]:
     return issues
 
 
+def validate_resource_format(content: str, state: dict) -> list[ValidationIssue]:
+    """验证资源卡是否为增量格式（仅 POWER_SYSTEM 项目）
+    
+    Args:
+        content: 章节内容
+        state: 项目状态
+        
+    Returns:
+        问题列表
+    """
+    issues = []
+    
+    # 检查是否为 POWER_SYSTEM 项目
+    specs = state.get("basic_specs", {})
+    genres = specs.get("main_genres", [])
+    
+    POWER_GENRES = ["都市高武", "玄幻奇幻", "仙侠修真"]
+    is_power = any(g in POWER_GENRES for g in genres)
+    
+    if not is_power:
+        return issues
+    
+    # 提取资源卡
+    resource_card = extract_section(content, "### 3. 资源卡")
+    if not resource_card:
+        return issues
+    
+    # 检查是否有增量格式（+XXX 或 -XXX）
+    # 获取资源卡中的列表项
+    lines = resource_card.splitlines()
+    for line in lines:
+        line = line.strip()
+        if line.startswith("-") and ("获得" in line or "消耗" in line or "损失" in line):
+            # 检查是否包含增量格式
+            if not re.search(r'[+-]\d+', line):
+                issues.append(ValidationIssue(
+                    type="error",
+                    message="[资源卡] POWER_SYSTEM项目必须使用增量格式（+XXX/-XXX），例如：+500灵石、-300金币"
+                ))
+                break
+    
+    return issues
+
+
 def validate_word_count(content: str, min_words: int, max_words: int, threshold_factor: float = 0.85) -> tuple[int, list[ValidationIssue]]:
     """验证字数
     threshold_factor: 通过阈值因子，默认85%（即 min_words * 0.85）
@@ -247,6 +291,10 @@ def validate_chapter(
                     type=ei.severity,
                     message=ei.message
                 ))
+
+    # 检查资源卡格式（仅 POWER_SYSTEM 项目）
+    resource_format_issues = validate_resource_format(content, state)
+    all_issues.extend(resource_format_issues)
 
     has_errors = any(issue.type == "error" for issue in all_issues)
     has_format_error = any(issue.type == "error" and "标记" in issue.message for issue in all_issues)
