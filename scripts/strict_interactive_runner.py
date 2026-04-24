@@ -11,7 +11,7 @@ from typing import Optional
 from common_io import load_project_state
 from path_rules import volume_memory_json
 from progress_rules import get_chapters_per_volume, get_current_progress, is_volume_boundary
-from revision_state import get_pending_chapter_revision, get_volume_revision
+from revision_state import get_pending_chapter_revision, get_volume_revision, get_volume_revision_status
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -25,6 +25,8 @@ FIXED_MENUS = {
         "multiple": False,
         "options": [
             {"label": "新建项目", "description": "从零开始设定并建立新的创意写作项目"},
+            {"label": "继续已有项目", "description": "扫描并继续一个已存在的创意写作项目"},
+            {"label": "仅规划", "description": "只产出设定和卷章规划，不初始化正式项目"},
             {"label": "退出", "description": "立即结束本次流程"},
         ],
     },
@@ -66,6 +68,7 @@ FIXED_MENUS = {
         "multiple": False,
         "options": [
             {"label": "整章重写", "description": "根据高严重度问题生成整章重写提示"},
+            {"label": "重写工作卡", "description": "根据字段问题重写内部工作卡并对齐正文"},
             {"label": "AI润色", "description": "根据低严重度问题生成局部润色提示"},
             {"label": "暂停", "description": "暂停等待，稍后继续"},
         ],
@@ -94,6 +97,30 @@ FIXED_MENUS = {
         ],
     },
 }
+
+
+def _candidate_project_dirs(base_dir: Path) -> list[Path]:
+    candidates: list[Path] = []
+    if base_dir.is_file():
+        base_dir = base_dir.parent
+    if not base_dir.exists():
+        return []
+    for child in sorted(base_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        if (child / "wizard_state.json").exists() or (child / ".project_config.json").exists():
+            candidates.append(child)
+    return candidates
+
+
+def _emit_state_menu(question: str, header: str, options: list[dict], multiple: bool = False) -> int:
+    print(json.dumps({
+        "question": question,
+        "header": header,
+        "multiple": multiple,
+        "options": options,
+    }, ensure_ascii=False, indent=2))
+    return 0
 
 
 def _has_volume_memory(project_dir: Path) -> bool:
@@ -139,7 +166,7 @@ def main() -> int:
             current_vol = _get_vol_num(project_dir)
             if current_vol is not None:
                 volume_revision = get_volume_revision(project_dir, current_vol)
-                if volume_revision and volume_revision.get("status") in {"pending_regenerate", "pending_polish"}:
+                if volume_revision and volume_revision.get("status") in {"pending_regenerate", "pending_rewrite_card", "pending_polish"}:
                     print(json.dumps(FIXED_MENUS["volume-revision-menu"], ensure_ascii=False, indent=2))
                     return 0
             if _has_volume_memory(project_dir):
@@ -167,8 +194,9 @@ def main() -> int:
         import subprocess
         project_dir = Path(sys.argv[2])
         vol_num = int(sys.argv[3]) if len(sys.argv) > 3 else _get_vol_num(project_dir)
+        status = get_volume_revision_status(project_dir, vol_num) if vol_num else None
         fix_plan_path = project_dir / "FIX_PLAN.json"
-        if not fix_plan_path.exists():
+        if not status and not fix_plan_path.exists():
             print(json.dumps({"error": "FIX_PLAN.json not found"}, ensure_ascii=False, indent=2))
             return 1
         chapter_file = project_dir / "chapters" / f"vol{vol_num:02d}"
@@ -181,7 +209,9 @@ def main() -> int:
                 ch_num = int(m.group(1)) if m else 1
         router_script = SCRIPT_DIR / "volume_revision_router.py"
         if router_script.exists():
-            cmd = [sys.executable, str(router_script), str(project_dir), str(vol_num), str(ch_num), str(fix_plan_path)]
+            cmd = [sys.executable, str(router_script), str(project_dir), str(vol_num), str(ch_num)]
+            if fix_plan_path.exists():
+                cmd.append(str(fix_plan_path))
             subprocess.run(cmd)
             return 0
         else:
@@ -193,13 +223,17 @@ def main() -> int:
         project_dir = Path(sys.argv[2])
         vol_num = int(sys.argv[3])
         ch_num = int(sys.argv[4])
+        pending = get_pending_chapter_revision(project_dir)
         fix_plan_path = project_dir / "CHAPTER_FIX_PLAN.json"
-        if not fix_plan_path.exists():
+        if not pending and not fix_plan_path.exists():
             print(json.dumps({"error": "CHAPTER_FIX_PLAN.json not found"}, ensure_ascii=False, indent=2))
             return 1
         router_script = SCRIPT_DIR / "volume_revision_router.py"
         if router_script.exists():
-            cmd = [sys.executable, str(router_script), str(project_dir), str(vol_num), str(ch_num), str(fix_plan_path), "--single"]
+            cmd = [sys.executable, str(router_script), str(project_dir), str(vol_num), str(ch_num)]
+            if fix_plan_path.exists():
+                cmd.append(str(fix_plan_path))
+            cmd.append("--single")
             subprocess.run(cmd)
             return 0
         else:
@@ -211,13 +245,35 @@ def main() -> int:
         return 0
 
     if mode == "state":
-        print(json.dumps({
-            "question": "该项目状态暂不支持预设问题",
-            "header": "状态查询",
-            "options": [],
-            "multiple": False
-        }, ensure_ascii=False, indent=2))
-        return 0
+        if len(sys.argv) < 4:
+            return _usage()
+        target = Path(sys.argv[2]).expanduser().resolve()
+        preset_key = sys.argv[3]
+        limit = int(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4].isdigit() else 4
+
+        if preset_key == "resume-projects":
+            candidates = _candidate_project_dirs(target)[:limit]
+            if not candidates:
+                return _emit_state_menu("未发现可继续的项目。", "继续项目", [])
+            return _emit_state_menu(
+                "请选择要继续的项目：",
+                "继续项目",
+                [{"label": candidate.name, "description": str(candidate)} for candidate in candidates],
+            )
+
+        if preset_key == "next-action":
+            project_dir = target if target.is_dir() else target.parent
+            pending_chapter = get_pending_chapter_revision(project_dir)
+            if pending_chapter:
+                return _emit_state_menu(**FIXED_MENUS["chapter-revision-menu"])
+            if is_volume_boundary(project_dir):
+                current_vol = _get_vol_num(project_dir)
+                if current_vol is not None and _has_volume_memory(project_dir):
+                    return _emit_state_menu(**FIXED_MENUS["volume-passed"])
+                return _emit_state_menu(**FIXED_MENUS["volume-ending"])
+            return _emit_state_menu(**FIXED_MENUS["action-menu"])
+
+        return _emit_state_menu("该状态预设暂未实现", "状态查询", [])
 
     return _usage()
 

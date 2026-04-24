@@ -149,6 +149,7 @@ class GlobalClock:
         text = text.strip()
 
         patterns = [
+            (r"(\d+(?:\.\d+)?)\s*分钟", 1 / 24 / 60),
             (r"(\d+(?:\.\d+)?)\s*小时", 1 / 24),
             (r"(\d+(?:\.\d+)?)\s*天", 1),
             (r"(\d+(?:\.\d+)?)\s*月", 30),
@@ -178,6 +179,26 @@ class GlobalClock:
 
         if not text:
             return None
+
+        relative_day = re.match(r"第(\d+)(?:天|日)(清晨|早晨|上午|中午|正午|下午|傍晚|晚上|深夜)?$", text)
+        if relative_day:
+            day_offset = int(relative_day.group(1)) - 1
+            hour_map = {
+                "清晨": 6,
+                "早晨": 8,
+                "上午": 10,
+                "中午": 12,
+                "正午": 12,
+                "下午": 15,
+                "傍晚": 18,
+                "晚上": 20,
+                "深夜": 23,
+                None: 0,
+            }
+            clock = self.load()
+            epoch = clock["epoch"]
+            base = datetime(epoch["year"], epoch["month"], epoch["day"])
+            return base + timedelta(days=day_offset, hours=hour_map[relative_day.group(2)])
 
         # 绝对日期
         if re.match(r"\d{4}-", text):

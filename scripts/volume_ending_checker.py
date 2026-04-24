@@ -9,10 +9,12 @@ from pathlib import Path
 from typing import Optional
 
 from chapter_scan import chapter_file_by_number, chapter_files_in_volume, latest_chapter
+from card_parser import CARD_MARKER
 from check_rules import run_single_chapter_checks, run_volume_checks
 from common_io import load_project_state
+from path_rules import chapter_card_file
 from revision_state import set_volume_revision, update_volume_memory_state
-from rule_engine import CheckResult, build_fix_plan, passed_count
+from rule_engine import CheckResult, build_fix_plan, build_revision_tasks_from_check_results, infer_revision_status, passed_count
 from volume_state_enricher import enrich_volume_state
 
 
@@ -25,10 +27,20 @@ class VolumeEndingChecker:
         return load_project_state(self.project_dir)
 
     def _load_chapters(self, vol_num: int) -> list[tuple[int, str]]:
-        return [
-            (chapter_num, file_path.read_text(encoding="utf-8"))
-            for chapter_num, file_path in chapter_files_in_volume(self.project_dir, vol_num)
-        ]
+        chapters = []
+        for chapter_num, file_path in chapter_files_in_volume(self.project_dir, vol_num):
+            content = file_path.read_text(encoding="utf-8")
+            if CARD_MARKER not in content:
+                card_candidates = [
+                    chapter_card_file(self.project_dir, vol_num, chapter_num),
+                    file_path.parent / "cards" / f"{file_path.stem}_card.md",
+                ]
+                for candidate in card_candidates:
+                    if candidate.exists():
+                        content = content.rstrip() + "\n\n" + candidate.read_text(encoding="utf-8")
+                        break
+            chapters.append((chapter_num, content))
+        return chapters
 
     def check(self, vol_num: Optional[int] = None) -> list[CheckResult]:
         if vol_num is None:
@@ -51,6 +63,15 @@ class VolumeEndingChecker:
         if not chapter_file:
             return []
         content = chapter_file.read_text(encoding="utf-8")
+        if CARD_MARKER not in content:
+            card_candidates = [
+                chapter_card_file(self.project_dir, vol_num, ch_num),
+                chapter_file.parent / "cards" / f"{chapter_file.stem}_card.md",
+            ]
+            for candidate in card_candidates:
+                if candidate.exists():
+                    content = content.rstrip() + "\n\n" + candidate.read_text(encoding="utf-8")
+                    break
         self.results = run_single_chapter_checks(ch_num, content, self._load_state())
         return self.results
 
@@ -135,6 +156,7 @@ def main() -> None:
     print(f"\n报告已保存: {report_path}")
 
     fix_plan = checker.get_fix_plan()
+    volume_tasks = build_revision_tasks_from_check_results(results)
     fix_plan_path = project_dir / "FIX_PLAN.json"
     fix_plan_path.write_text(json.dumps(fix_plan, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"回改计划已保存: {fix_plan_path}")
@@ -146,8 +168,8 @@ def main() -> None:
         else:
             target_vol = vol_num
         if target_vol:
-            status = "pending_regenerate" if fix_plan.get("total_regenerate", 0) > 0 else "pending_polish"
-            set_volume_revision(project_dir, target_vol, status, fix_plan, memory_enriched=False)
+            status = infer_revision_status(volume_tasks, fix_plan)
+            set_volume_revision(project_dir, target_vol, status, fix_plan, memory_enriched=False, tasks=volume_tasks)
         sys.exit(1)
 
     target_vol = vol_num
@@ -157,7 +179,7 @@ def main() -> None:
             target_vol = current_vol
 
     if target_vol is not None:
-        set_volume_revision(project_dir, int(target_vol), "passed", fix_plan, memory_enriched=False)
+        set_volume_revision(project_dir, int(target_vol), "passed", fix_plan, memory_enriched=False, tasks=[])
         volume_memory = enrich_volume_state(project_dir, int(target_vol))
         if volume_memory:
             update_volume_memory_state(project_dir, int(target_vol), memory_enriched=True)

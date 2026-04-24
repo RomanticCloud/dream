@@ -8,7 +8,7 @@ from planning_rules import describe_target_profile, volume_label
 
 WORD_TARGET_OPTIONS = ["30万字", "40万字", "50万字", "100万字"]
 
-CHAPTER_LENGTH_OPTIONS = ["3500-4500字", "4500-5500字"]
+CHAPTER_LENGTH_OPTIONS = ["2000-2500字", "2500-3500字", "3500-4500字", "4500-5500字"]
 
 GENDER_OPTIONS = ["男", "女"]
 
@@ -94,12 +94,12 @@ def parse_word_target(label: str) -> int:
 
 def parse_chapter_length(label: str) -> tuple[int, int]:
     if label == "用户输入":
-        return (3500, 5500)
+        return (3500, 4500)
     label = label.replace("字", "")
     parts = label.split("-")
     if len(parts) == 2:
         return (int(parts[0]), int(parts[1]))
-    return (3500, 5500)
+    return (3500, 4500)
 
 
 def build_basic_specs(

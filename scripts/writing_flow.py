@@ -2,14 +2,15 @@
 """写作流程管理器 - 管理连续写作流程"""
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
 from card_parser import extract_body
-from common_io import find_chapter_path, load_json_file, load_project_state, save_json_file
+from common_io import ProjectStateError, find_chapter_path, load_json_file, load_project_state, require_chapter_word_range, require_locked_protagonist_gender, save_json_file
 from enhanced_validator import EnhancedValidator
 from narrative_context import NarrativeContext
-from path_rules import volume_memory_md
+from path_rules import chapter_file, volume_memory_md
 from progress_rules import get_chapters_per_volume, get_current_progress
 from revision_state import get_pending_chapter_revision, get_volume_revision
 from state_tracker import StateTracker
@@ -23,15 +24,14 @@ def get_target_info(state: dict) -> tuple[int, int, int]:
     chapters_per_volume = arch.get("chapters_per_volume", 10)
     total_chapters = total_volumes * chapters_per_volume
 
-    word_min = specs.get("chapter_length_min", 3500)
-    word_max = specs.get("chapter_length_max", 5500)
+    word_min, word_max = require_chapter_word_range(state)
 
     return total_chapters, word_min, word_max
 
 
 def show_volume_boundary_actions(project_dir: Path, state: dict, current_vol: int) -> bool:
     volume_revision = get_volume_revision(project_dir, current_vol)
-    if volume_revision and volume_revision.get("status") in {"pending_regenerate", "pending_polish"}:
+    if volume_revision and volume_revision.get("status") in {"pending_regenerate", "pending_rewrite_card", "pending_polish"}:
         print(f"\n当前卷存在待处理回改：第{current_vol}卷")
         print("可选动作：")
         print(f"  1. 执行回改: python3 scripts/strict_interactive_runner.py volume-revision {project_dir} {current_vol}")
@@ -56,13 +56,12 @@ def show_volume_boundary_actions(project_dir: Path, state: dict, current_vol: in
 
 
 def check_chapter_status(project_dir: Path, vol_num: int, ch_num: int) -> dict:
-    vol_name = f"vol{vol_num:02d}"
-    chapter_file = project_dir / "chapters" / vol_name / f"{ch_num:03d}_第{ch_num}章.md"
+    chapter_path = chapter_file(project_dir, vol_num, ch_num)
 
-    if not chapter_file.exists():
+    if not chapter_path.exists():
         return {"status": "not_created", "file": None}
 
-    content = chapter_file.read_text(encoding="utf-8")
+    content = chapter_path.read_text(encoding="utf-8")
     char_count = len(content)
     body = extract_body(content)
     body_word = len(body.replace("在此撰写正文...", "").replace("（", "").replace("）", ""))
@@ -71,7 +70,7 @@ def check_chapter_status(project_dir: Path, vol_num: int, ch_num: int) -> dict:
         "status": "completed" if body_word > 100 else "in_progress",
         "char_count": char_count,
         "body_word": body_word,
-        "file": chapter_file
+        "file": chapter_path
     }
 
 
@@ -104,7 +103,26 @@ def run_writing_flow(project_dir: Path):
         print("未找到项目状态文件")
         sys.exit(1)
 
+    try:
+        require_locked_protagonist_gender(state)
+        require_chapter_word_range(state)
+    except ProjectStateError as exc:
+        print(f"项目配置不完整：{exc}")
+        sys.exit(1)
+
     show_status(project_dir, state)
+
+    dispatcher_script = Path(__file__).resolve().parent / "continuous_writer.py"
+    dispatch = subprocess.run(
+        [sys.executable, str(dispatcher_script), "run", str(project_dir)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if dispatch.stdout.strip():
+        print("\n连续写作调度：")
+        print(dispatch.stdout.strip())
+        return
 
     pending_chapter = get_pending_chapter_revision(project_dir)
     if pending_chapter:
@@ -114,6 +132,8 @@ def run_writing_flow(project_dir: Path):
         print(f"\n当前存在待处理章节回改：{chapter_key}")
         if payload.get("status") == "pending_regenerate":
             print("下一步：整章重写")
+        elif payload.get("status") == "pending_rewrite_card":
+            print("下一步：重写工作卡")
         else:
             print("下一步：AI润色")
         print(f"运行: python3 scripts/strict_interactive_runner.py chapter-revision {project_dir} {vol_num} {ch_num}")

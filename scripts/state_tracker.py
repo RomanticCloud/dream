@@ -8,14 +8,20 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from common_io import (
-    extract_body,
-    extract_section,
-    extract_bullets,
-    extract_all_bullets,
-    load_json_file,
-    save_json_file,
+from card_names import CARRY_CARD, PLOT_CARD, RELATION_CARD, RESOURCE_CARD, STATUS_CARD
+from card_fields import (
+    FIELD_CARRY_MUST,
+    FIELD_PLOT_PAYOFF,
+    FIELD_PLOT_SETUP,
+    FIELD_RELATION_CHANGE,
+    FIELD_RELATION_MAIN,
+    FIELD_RESOURCE_SETUP,
+    FIELD_STATUS_EMOTION,
+    FIELD_STATUS_GOAL,
+    FIELD_STATUS_LOCATION,
 )
+from common_io import extract_body, extract_section, extract_bullets, extract_all_bullets, load_json_file, save_json_file
+from chapter_view import load_chapter_view
 from global_clock import GlobalClock
 
 
@@ -45,6 +51,17 @@ class StateTracker:
         """保存状态文件"""
         save_json_file(self.state_file, self.state)
 
+    def _load_chapter_content(self, chapter_path: Path) -> str:
+        parent_name = chapter_path.parent.name
+        stem = chapter_path.stem
+        if parent_name.startswith("vol") and stem.startswith("ch") and stem[2:].isdigit():
+            vol_num = int(parent_name.replace("vol", ""))
+            ch_num = int(stem.replace("ch", ""))
+            view = load_chapter_view(self.project_dir, vol_num, ch_num)
+            if view.chapter_path.exists() or view.card_path.exists():
+                return view.merged_text
+        return chapter_path.read_text(encoding="utf-8")
+
     def update_character_state(self, chapter_path: Path):
         """更新人物状态
 
@@ -61,30 +78,30 @@ class StateTracker:
             if char_data["states"] and char_data["states"][-1]["chapter"] == chapter_name:
                 # 已处理过此章节，跳过
                 return
-        
-        content = chapter_path.read_text(encoding="utf-8")
+
+        content = self._load_chapter_content(chapter_path)
         body = extract_body(content)
 
         # 从状态卡提取
-        status_card = extract_section(content, "### 1. 状态卡")
+        status_card = extract_section(content, STATUS_CARD)
         status_bullets = extract_bullets(status_card)
 
         # 从关系卡提取
-        relationship_card = extract_section(content, "### 4. 关系卡")
+        relationship_card = extract_section(content, RELATION_CARD)
         relationship_bullets = extract_bullets(relationship_card)
 
         # 从正文中提取人物信息
         characters_in_chapter = self._extract_characters_from_body(body)
 
         # 从状态卡中补充主角信息
-        main_location = status_bullets.get("主角当前位置", "未知")
-        main_emotion = status_bullets.get("主角当前情绪", "未知")
-        main_goal = status_bullets.get("主角当前目标", "未知")
+        main_location = status_bullets.get(FIELD_STATUS_LOCATION, "未知")
+        main_emotion = status_bullets.get(FIELD_STATUS_EMOTION, "未知")
+        main_goal = status_bullets.get(FIELD_STATUS_GOAL, "未知")
 
         # 确定主角名称（从关系卡或状态卡中提取第一个出现的人物）
         main_char = None
         if relationship_bullets:
-            main_chars_text = relationship_bullets.get("主要人物", "")
+            main_chars_text = relationship_bullets.get(FIELD_RELATION_MAIN, "")
             if main_chars_text:
                 main_char = main_chars_text.split("、")[0].strip()
 
@@ -94,7 +111,7 @@ class StateTracker:
             characters_in_chapter[main_char]["goal"] = main_goal
 
         # 从关系卡中提取关系变化
-        relationship_change = relationship_bullets.get("人物变化", "")
+        relationship_change = relationship_bullets.get(FIELD_RELATION_CHANGE, "")
         if relationship_change:
             for char_name in characters_in_chapter:
                 characters_in_chapter[char_name]["relationship_changes"].append(
@@ -153,14 +170,14 @@ class StateTracker:
         - 进行中的事件线程
         - 待解决的冲突/问题
         """
-        content = chapter_path.read_text(encoding="utf-8")
+        content = self._load_chapter_content(chapter_path)
 
         # 从情节卡提取
-        plot_card = extract_section(content, "### 2. 情节卡")
+        plot_card = extract_section(content, PLOT_CARD)
         plot_bullets = extract_all_bullets(plot_card)
 
-        # 从承接卡提取待解决问题
-        carry_card = extract_section(content, "### 6. 承上启下卡")
+        # 从承上启下卡提取待解决问题
+        carry_card = extract_section(content, CARRY_CARD)
         carry_bullets = extract_all_bullets(carry_card)
 
         # 更新事件线程
@@ -186,14 +203,14 @@ class StateTracker:
         - 待回收的伏笔
         - 已回收的伏笔
         """
-        content = chapter_path.read_text(encoding="utf-8")
+        content = self._load_chapter_content(chapter_path)
 
         # 从情节卡提取伏笔信息
-        plot_card = extract_section(content, "### 2. 情节卡")
+        plot_card = extract_section(content, PLOT_CARD)
         plot_bullets = extract_bullets(plot_card)
 
         # 检查是否有新伏笔
-        new_foreshadowing = plot_bullets.get("新埋伏笔", "")
+        new_foreshadowing = plot_bullets.get(FIELD_PLOT_SETUP, "")
         if new_foreshadowing:
             self.state["foreshadowing"].append(
                 {
@@ -205,7 +222,7 @@ class StateTracker:
             )
 
         # 检查是否有伏笔回收
-        resolved_foreshadowing = plot_bullets.get("回收伏笔", "")
+        resolved_foreshadowing = plot_bullets.get(FIELD_PLOT_PAYOFF, "")
         if resolved_foreshadowing:
             # 标记对应的伏笔为已回收
             for foreshadow in self.state["foreshadowing"]:
@@ -217,9 +234,9 @@ class StateTracker:
                     break
 
         # 从资源卡提取伏笔
-        resource_card = extract_section(content, "### 3. 资源卡")
+        resource_card = extract_section(content, RESOURCE_CARD)
         resource_bullets = extract_bullets(resource_card)
-        resource_foreshadowing = resource_bullets.get("伏笔", "")
+        resource_foreshadowing = resource_bullets.get(FIELD_RESOURCE_SETUP, "")
         if resource_foreshadowing and resource_foreshadowing != new_foreshadowing:
             self.state["foreshadowing"].append(
                 {
@@ -305,7 +322,7 @@ class StateTracker:
         Returns:
             更新后的当前时间字典
         """
-        content = chapter_path.read_text(encoding="utf-8")
+        content = self._load_chapter_content(chapter_path)
 
         # 从状态卡提取时间信息
         status_card = extract_section(content, "### 1. 状态卡")

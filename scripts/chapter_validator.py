@@ -10,21 +10,74 @@ from pathlib import Path
 from card_parser import CARD_MARKER, BODY_MARKER, extract_body, extract_section, filled_bullet_stats, split_card_line
 from chapter_scan import chapter_file_by_number, latest_chapter
 from check_rules import run_single_chapter_checks
-from common_io import find_chapter_path, load_project_state
+from card_names import CARRY_CARD, required_card_headers
+from card_fields import (
+    CARRY_FIELDS,
+    EMOTION_FIELDS,
+    FIELD_CARRY_MUST,
+    FIELD_CARRY_HOOK,
+    FIELD_EMOTION_SUSPENSE,
+    FIELD_POWER_AFTER_EFFECT,
+    FIELD_POWER_CROSS,
+    FIELD_POWER_LEVEL,
+    FIELD_POWER_LOSS_RATIO,
+    FIELD_POWER_NEW_TRUMP,
+    FIELD_POWER_REASONABLE,
+    FIELD_POWER_TARGET,
+    FIELD_POWER_TRUMP_NAME,
+    FIELD_EMOTION_TARGET,
+    FIELD_PLOT_EVENT,
+    FIELD_RELATION_MAIN,
+    FIELD_RESOURCE_GAIN,
+    FIELD_RESOURCE_LOSS,
+    FIELD_RESOURCE_SPEND,
+    FIELD_STATUS_ELAPSED,
+    FIELD_STATUS_EMOTION,
+    FIELD_STATUS_GOAL,
+    FIELD_STATUS_LOCATION,
+    FIELD_STATUS_TIMEPOINT,
+    PLOT_FIELDS,
+    POWER_CARD_FIELDS,
+    POWER_STATUS_FIELDS,
+    RELATION_FIELDS,
+    RESOURCE_FIELDS,
+    STATUS_FIELDS,
+)
+from field_value_rules import (
+    ERROR_REQUIRED_FIELDS,
+    POWER_ERROR_REQUIRED_FIELDS,
+    POWER_WARNING_REQUIRED_FIELDS,
+    RESOURCE_DELTA_FIELDS,
+    WARNING_REQUIRED_FIELDS,
+    has_resource_delta,
+    is_required_non_empty,
+    is_valid_elapsed,
+    is_valid_power_loss_ratio,
+    is_valid_timepoint,
+    is_yes_no,
+    parse_suspense_strength,
+    split_trump_names,
+)
+from common_io import ProjectStateError, find_chapter_path, load_project_state, require_chapter_word_range
+from chapter_view import load_chapter_view
 from enhanced_validator import EnhancedValidator
 from revision_state import clear_chapter_revision, set_chapter_revision
-from rule_engine import build_fix_plan
+from rule_engine import build_fix_plan, build_revision_tasks
 from time_logic_checker import check_all_logic as check_time_logic, apply_fixes as apply_time_logic_fixes, TimeLogicIssue
+from path_rules import chapter_card_file
 
 
-REQUIRED_CARD_HEADERS = [
-    "### 1. 状态卡",
-    "### 2. 情节卡",
-    "### 3. 资源卡",
-    "### 4. 关系卡",
-    "### 5. 情绪弧线卡",
-    "### 6. 承上启下卡",
-]
+def resolve_card_file(project_dir: Path, chapter_path: Path, vol_num: int, ch_num: int) -> Path:
+    candidates = [
+        chapter_card_file(project_dir, vol_num, ch_num),
+        chapter_path.parent / "cards" / f"{chapter_path.stem}_card.md",
+        chapter_path.parent / "cards" / f"ch{ch_num:03d}_card.md",
+        chapter_path.parent / "cards" / f"chapter_card_ch{ch_num:02d}.md",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 @dataclass
@@ -41,6 +94,7 @@ class ValidationResult:
     card_status: dict = field(default_factory=dict)
     file_path: Path | None = None
     fix_plan: dict = field(default_factory=dict)
+    revision_tasks: list[dict] = field(default_factory=list)
 
 
 def count_words(text: str) -> int:
@@ -54,9 +108,6 @@ def validate_format(content: str) -> list[ValidationIssue]:
 
     if BODY_MARKER not in content:
         issues.append(ValidationIssue("error", '缺少 "## 正文" 标记'))
-
-    if CARD_MARKER not in content:
-        issues.append(ValidationIssue("error", '缺少 "## 内部工作卡" 标记'))
 
     return issues
 
@@ -133,7 +184,7 @@ def validate_word_count(content: str, min_words: int, max_words: int, threshold_
     return word_count, issues
 
 
-def validate_cards(content: str) -> tuple[dict, list[ValidationIssue]]:
+def validate_cards(content: str, state: dict) -> tuple[dict, list[ValidationIssue]]:
     """验证工作卡"""
     issues = []
     card_status = {}
@@ -141,7 +192,18 @@ def validate_cards(content: str) -> tuple[dict, list[ValidationIssue]]:
     if CARD_MARKER not in content:
         return card_status, [ValidationIssue("error", '缺少 "## 内部工作卡" 标记')]
 
-    for header in REQUIRED_CARD_HEADERS:
+    required_headers = required_card_headers(state)
+    required_field_map = {
+        "### 1. 状态卡": POWER_STATUS_FIELDS if required_headers[1] == "### 2. 战力卡" else STATUS_FIELDS,
+        "### 2. 情节卡": PLOT_FIELDS,
+        "### 2. 战力卡": POWER_CARD_FIELDS,
+        "### 3. 资源卡": RESOURCE_FIELDS,
+        "### 4. 关系卡": RELATION_FIELDS,
+        "### 5. 情绪弧线卡": EMOTION_FIELDS,
+        "### 6. 承上启下卡": CARRY_FIELDS,
+    }
+
+    for header in required_headers:
         header_clean = header.replace("### ", "").replace(".", "")
         card_status[header_clean] = {}
 
@@ -162,19 +224,80 @@ def validate_cards(content: str) -> tuple[dict, list[ValidationIssue]]:
         if fill_rate < 0.5:
             issues.append(ValidationIssue("warning", f"{header} 填写不完整 ({filled_count}/{required_fields})"))
 
-    for header in REQUIRED_CARD_HEADERS:
+        bullets = extract_section(content, header)
+        bullet_map = {}
+        for line in bullets.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("-"):
+                continue
+            parts = split_card_line(stripped[1:])
+            if not parts:
+                continue
+            bullet_map[parts[0].strip()] = parts[1].strip()
+
+        expected_fields = required_field_map.get(header, [])
+        missing_fields = [field for field in expected_fields if field not in bullet_map]
+        if missing_fields:
+            issues.append(ValidationIssue("error", f"{header} 缺少标准字段: {', '.join(missing_fields)}"))
+
+        for field in ERROR_REQUIRED_FIELDS:
+            if field in bullet_map and not is_required_non_empty(bullet_map[field]):
+                issues.append(ValidationIssue("error", f"{header} 字段“{field}”不能为空"))
+
+        for field in WARNING_REQUIRED_FIELDS:
+            if field in bullet_map and not is_required_non_empty(bullet_map[field]):
+                issues.append(ValidationIssue("warning", f"{header} 字段“{field}”建议填写"))
+
+        if header == "### 2. 战力卡":
+            for field in POWER_ERROR_REQUIRED_FIELDS:
+                if field in bullet_map and not is_required_non_empty(bullet_map[field]):
+                    issues.append(ValidationIssue("error", f"{header} 字段“{field}”不能为空"))
+            for field in POWER_WARNING_REQUIRED_FIELDS:
+                if field in bullet_map and not is_required_non_empty(bullet_map[field]):
+                    issues.append(ValidationIssue("warning", f"{header} 字段“{field}”建议填写"))
+
+            if FIELD_POWER_CROSS in bullet_map and bullet_map[FIELD_POWER_CROSS] and not is_yes_no(bullet_map[FIELD_POWER_CROSS]):
+                issues.append(ValidationIssue("error", f"{header} 字段“{FIELD_POWER_CROSS}”只能填写“是”或“否”"))
+
+            if FIELD_POWER_NEW_TRUMP in bullet_map and bullet_map[FIELD_POWER_NEW_TRUMP] and not is_yes_no(bullet_map[FIELD_POWER_NEW_TRUMP]):
+                issues.append(ValidationIssue("error", f"{header} 字段“{FIELD_POWER_NEW_TRUMP}”只能填写“是”或“否”"))
+
+            if FIELD_POWER_LOSS_RATIO in bullet_map and bullet_map[FIELD_POWER_LOSS_RATIO] and not is_valid_power_loss_ratio(bullet_map[FIELD_POWER_LOSS_RATIO]):
+                issues.append(ValidationIssue("error", f"{header} 字段“{FIELD_POWER_LOSS_RATIO}”格式非法: {bullet_map[FIELD_POWER_LOSS_RATIO]}"))
+
+            if FIELD_POWER_TRUMP_NAME in bullet_map and is_required_non_empty(bullet_map[FIELD_POWER_TRUMP_NAME]) and not split_trump_names(bullet_map[FIELD_POWER_TRUMP_NAME]):
+                issues.append(ValidationIssue("error", f"{header} 字段“{FIELD_POWER_TRUMP_NAME}”必须包含至少一个底牌名称"))
+
+            if bullet_map.get(FIELD_POWER_CROSS) == "是" and not is_required_non_empty(bullet_map.get(FIELD_POWER_REASONABLE, "")):
+                issues.append(ValidationIssue("error", f"{header} 字段“{FIELD_POWER_REASONABLE}”在越级时必须填写"))
+
+        if FIELD_STATUS_ELAPSED in bullet_map and bullet_map[FIELD_STATUS_ELAPSED] and not is_valid_elapsed(bullet_map[FIELD_STATUS_ELAPSED]):
+            issues.append(ValidationIssue("error", f"{header} 字段“{FIELD_STATUS_ELAPSED}”格式非法: {bullet_map[FIELD_STATUS_ELAPSED]}"))
+
+        if FIELD_STATUS_TIMEPOINT in bullet_map and bullet_map[FIELD_STATUS_TIMEPOINT] and not is_valid_timepoint(bullet_map[FIELD_STATUS_TIMEPOINT]):
+            issues.append(ValidationIssue("error", f"{header} 字段“{FIELD_STATUS_TIMEPOINT}”格式非法: {bullet_map[FIELD_STATUS_TIMEPOINT]}"))
+
+        if FIELD_EMOTION_SUSPENSE in bullet_map and bullet_map[FIELD_EMOTION_SUSPENSE]:
+            if parse_suspense_strength(bullet_map[FIELD_EMOTION_SUSPENSE]) is None:
+                issues.append(ValidationIssue("error", f"{header} 字段“{FIELD_EMOTION_SUSPENSE}”必须为1-10的整数"))
+
+        for field in RESOURCE_DELTA_FIELDS:
+            if field in bullet_map and is_required_non_empty(bullet_map[field]) and not has_resource_delta(bullet_map[field]):
+                issues.append(ValidationIssue("warning", f"{header} 字段“{field}”建议使用 +/-数字+资源名 格式"))
+
+    for header in required_headers:
         section = extract_section(content, header)
         if not section:
             continue
 
-        if "承接" in header:
+        if header == CARRY_CARD:
             lines = section.splitlines()
             has_content = any(
                 split_card_line(line) and split_card_line(line)[1].strip()
                 for line in lines if line.strip().startswith("-")
             )
             if not has_content:
-                issues.append(ValidationIssue("warning", "承上启下卡 - 承接 字段未填写"))
+                issues.append(ValidationIssue("warning", "承上启下卡 未填写内容"))
 
     return card_status, issues
 
@@ -186,7 +309,7 @@ def validate_continuity(content: str) -> list[ValidationIssue]:
     if CARD_MARKER not in content:
         return issues
 
-    carry_section = extract_section(content, "### 6. 承上启下卡") or extract_section(content, "### 6.承接启下卡")
+    carry_section = extract_section(content, CARRY_CARD)
 
     has_carry_over = False
     for line in carry_section.splitlines():
@@ -214,9 +337,14 @@ def validate_chapter(
     """
 
     state = load_project_state(project_dir)
-    specs = state.get("basic_specs", {})
-    min_words = specs.get("chapter_length_min", 3500)
-    max_words = specs.get("chapter_length_max", 5500)
+    try:
+        min_words, max_words = require_chapter_word_range(state)
+    except ProjectStateError as exc:
+        return ValidationResult(
+            passed=False,
+            issues=[ValidationIssue("error", f"项目配置不完整：{exc}")],
+            file_path=None,
+        )
 
     if vol_num is None or ch_num is None:
         vol_num, ch_num, chapter_file = latest_chapter(project_dir)
@@ -236,16 +364,14 @@ def validate_chapter(
             file_path=chapter_file
         )
 
-    content = chapter_file.read_text(encoding="utf-8")
+    view = load_chapter_view(project_dir, vol_num, ch_num)
+    raw_content = view.raw_body_file
+    content = view.merged_text
 
-    # 支持分离架构：如果正文文件缺少卡片，尝试读取 cards 目录
-    if CARD_MARKER not in content:
-        card_file = chapter_file.parent / "cards" / f"ch{ch_num:02d}_card.md"
-        if card_file.exists():
-            card_content = card_file.read_text(encoding="utf-8")
-            content = content.rstrip() + "\n\n" + card_content
-
-    all_issues = []
+    if view.has_inline_card:
+        all_issues = [ValidationIssue("error", '正文文件不得包含 "## 内部工作卡" 标记，请先分离工作卡')]
+    else:
+        all_issues = []
 
     format_issues = validate_format(content)
     all_issues.extend(format_issues)
@@ -253,7 +379,7 @@ def validate_chapter(
     word_count, word_issues = validate_word_count(content, min_words, max_words, threshold_factor)
     all_issues.extend(word_issues)
 
-    card_status, card_issues = validate_cards(content)
+    card_status, card_issues = validate_cards(content, state)
     all_issues.extend(card_issues)
 
     continuity_issues = validate_continuity(content)
@@ -298,6 +424,7 @@ def validate_chapter(
 
     has_errors = any(issue.type == "error" for issue in all_issues)
     has_format_error = any(issue.type == "error" and "标记" in issue.message for issue in all_issues)
+    revision_tasks = build_revision_tasks(all_issues)
 
     fix_plan = {}
     if not has_format_error:
@@ -310,10 +437,13 @@ def validate_chapter(
                 "severity": "high",
             })
             fix_plan["total_regenerate"] = len(fix_plan["regenerate"])
+        has_rewrite_card = any(task.get("fix_method") == "rewrite_card" for task in revision_tasks)
         if fix_plan.get("total_regenerate", 0) > 0:
-            set_chapter_revision(project_dir, vol_num, ch_num, "pending_regenerate", fix_plan)
-        elif fix_plan.get("total_polish", 0) > 0:
-            set_chapter_revision(project_dir, vol_num, ch_num, "pending_polish", fix_plan)
+            set_chapter_revision(project_dir, vol_num, ch_num, "pending_regenerate", fix_plan, revision_tasks)
+        elif has_rewrite_card:
+            set_chapter_revision(project_dir, vol_num, ch_num, "pending_rewrite_card", fix_plan, revision_tasks)
+        elif fix_plan.get("total_polish", 0) > 0 or revision_tasks:
+            set_chapter_revision(project_dir, vol_num, ch_num, "pending_polish", fix_plan, revision_tasks)
         else:
             clear_chapter_revision(project_dir, vol_num, ch_num)
 
@@ -323,7 +453,8 @@ def validate_chapter(
         word_count=word_count,
         card_status=card_status,
         file_path=chapter_file,
-        fix_plan=fix_plan
+        fix_plan=fix_plan,
+        revision_tasks=revision_tasks,
     )
 
 
@@ -342,23 +473,16 @@ def fix_time_logic_and_revalidate(
     if not chapter_file or not chapter_file.exists():
         return False, []
 
-    from card_parser import extract_body
-    content = chapter_file.read_text(encoding="utf-8")
-    body = extract_body(content)
+    view = load_chapter_view(project_dir, vol_num, ch_num)
+    body = extract_body(view.body_text)
 
     issues = check_time_logic(body)
     if not issues:
         return True, []
 
     fixed_body = apply_time_logic_fixes(body, issues)
-    fixed_content = content.replace(body, fixed_body)
-
-    card_file = chapter_file.parent / "cards" / f"ch{ch_num:02d}_card.md"
-    if card_file.exists():
-        card_content = card_file.read_text(encoding="utf-8")
-        fixed_content = fixed_content.rstrip() + "\n\n" + card_content
-
-    chapter_file.write_text(fixed_content, encoding="utf-8")
+    fixed_content = view.body_text.replace(body, fixed_body, 1)
+    chapter_file.write_text(fixed_content.rstrip() + "\n", encoding="utf-8")
 
     new_issues = check_time_logic(extract_body(fixed_content))
     return len(new_issues) == 0, new_issues
@@ -411,7 +535,8 @@ def main():
         output = {
             "passed": result.passed,
             "word_count": result.word_count,
-            "issues": [{"type": i.type, "message": i.message} for i in result.issues]
+            "issues": [{"type": i.type, "message": i.message} for i in result.issues],
+            "revision_tasks": result.revision_tasks,
         }
         if result.fix_plan:
             output["fix_plan"] = result.fix_plan

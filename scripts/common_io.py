@@ -12,6 +12,58 @@ import json
 import re
 from pathlib import Path
 
+from chapter_scan import chapter_file_by_number
+
+
+class ProjectStateError(ValueError):
+    """Raised when the project state is missing required locked fields."""
+
+
+def _coerce_positive_int(value, field_name: str) -> int:
+    if isinstance(value, bool):
+        raise ProjectStateError(f"字段 {field_name} 不能是布尔值")
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and value.strip().isdigit():
+        parsed = int(value.strip())
+    else:
+        raise ProjectStateError(f"字段 {field_name} 缺失或格式非法")
+
+    if parsed <= 0:
+        raise ProjectStateError(f"字段 {field_name} 必须是正整数")
+    return parsed
+
+
+def require_chapter_word_range(state: dict) -> tuple[int, int]:
+    """Return the locked chapter word range or raise.
+
+    All runtime writing scripts must read the numeric locked fields instead of
+    silently falling back to baked-in defaults.
+    """
+    specs = state.get("basic_specs")
+    if not isinstance(specs, dict):
+        raise ProjectStateError("项目状态缺少 basic_specs，无法确定章节字数范围")
+
+    min_words = _coerce_positive_int(specs.get("chapter_length_min"), "basic_specs.chapter_length_min")
+    max_words = _coerce_positive_int(specs.get("chapter_length_max"), "basic_specs.chapter_length_max")
+    if max_words < min_words:
+        raise ProjectStateError("章节字数范围非法：chapter_length_max 不能小于 chapter_length_min")
+
+    return min_words, max_words
+
+
+def require_locked_protagonist_gender(state: dict) -> str:
+    """Ensure protagonist gender is explicitly locked to 男 or 女."""
+    protagonist = state.get("protagonist")
+    if not isinstance(protagonist, dict):
+        raise ProjectStateError("项目状态缺少 protagonist，无法确认主角性别")
+
+    gender = protagonist.get("gender")
+    if gender not in {"男", "女"}:
+        raise ProjectStateError("项目未锁定主角性别，请先在初始化中明确选择主角为男性或女性")
+
+    return gender
+
 
 def parse_date(text: str) -> tuple[int, int, int]:
     """解析日期文本为 (year, month, day)
@@ -215,15 +267,21 @@ def find_chapter_path(project_dir: Path, chapter_num: int) -> Path | None:
         chapters_per_volume = specs.get("chapters_per_volume", 10)
 
     vol_num = (chapter_num - 1) // chapters_per_volume + 1
+    chapter_in_volume = (chapter_num - 1) % chapters_per_volume + 1
+
+    chapter_path = chapter_file_by_number(project_dir, vol_num, chapter_in_volume)
+    if chapter_path is not None:
+        return chapter_path
+
     vol_name = f"vol{vol_num:02d}"
     chapters_dir = project_dir / "chapters" / vol_name
     
     # 尝试多种文件命名格式
     patterns = [
-        f"ch{chapter_num:02d}.md",
-        f"{chapter_num:03d}_第{chapter_num}章.md",
-        f"chapter_{chapter_num:02d}.md",
-        f"{chapter_num}.md",
+        f"ch{chapter_in_volume:02d}.md",
+        f"{chapter_in_volume:03d}_第{chapter_in_volume}章.md",
+        f"chapter_{chapter_in_volume:02d}.md",
+        f"{chapter_in_volume}.md",
     ]
     
     for pattern in patterns:

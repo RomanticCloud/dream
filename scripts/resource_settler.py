@@ -14,7 +14,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from common_io import extract_section, load_json_file, save_json_file
+from card_names import POWER_CARD, RESOURCE_CARD
+from card_fields import FIELD_POWER_LOSS_RATIO, FIELD_POWER_TRUMP_NAME, FIELD_RESOURCE_GAIN, FIELD_RESOURCE_LOSS, FIELD_RESOURCE_SPEND
+from field_value_rules import parse_power_loss_ratio, split_trump_names
+from common_io import extract_section, extract_bullets, load_json_file, save_json_file
+from path_rules import chapter_card_file
 
 
 class ResourceSettler:
@@ -68,13 +72,53 @@ class ResourceSettler:
 
         return deltas
 
+    def _default_inventory(self) -> dict:
+        return {
+            "resources": {},
+            "last_updated_chapter": None,
+            "applied_chapters": [],
+        }
+
+    def _default_ability_state(self) -> dict:
+        return {
+            "战力损耗比例": 0,
+            "底牌列表": [],
+            "可用底牌": [],
+            "last_updated_chapter": None,
+            "applied_chapters": [],
+        }
+
+    def _normalize_inventory(self, payload: dict) -> dict:
+        if not payload:
+            return self._default_inventory()
+        if "resources" not in payload:
+            payload = {
+                "resources": payload,
+                "last_updated_chapter": None,
+                "applied_chapters": [],
+            }
+        payload.setdefault("resources", {})
+        payload.setdefault("last_updated_chapter", None)
+        payload.setdefault("applied_chapters", [])
+        return payload
+
+    def _normalize_ability_state(self, payload: dict) -> dict:
+        if not payload:
+            return self._default_ability_state()
+        normalized = self._default_ability_state()
+        normalized.update(payload)
+        normalized["底牌列表"] = list(dict.fromkeys(normalized.get("底牌列表", [])))
+        normalized["可用底牌"] = list(dict.fromkeys(normalized.get("可用底牌", [])))
+        normalized["applied_chapters"] = list(dict.fromkeys(normalized.get("applied_chapters", [])))
+        return normalized
+
     def load_or_create_inventory(self) -> dict:
         """加载或创建资源库存"""
         if self.inventory_file.exists():
-            inventory = load_json_file(self.inventory_file)
+            inventory = self._normalize_inventory(load_json_file(self.inventory_file))
             self.logger.info(f"加载资源库存: {self.inventory_file}")
         else:
-            inventory = {}
+            inventory = self._default_inventory()
             self.logger.info("创建新的资源库存文件")
 
         return inventory
@@ -82,14 +126,10 @@ class ResourceSettler:
     def load_or_create_ability_state(self) -> dict:
         """加载或创建能力状态"""
         if self.ability_file.exists():
-            ability_state = load_json_file(self.ability_file)
+            ability_state = self._normalize_ability_state(load_json_file(self.ability_file))
             self.logger.info(f"加载能力状态: {self.ability_file}")
         else:
-            ability_state = {
-                "战力损耗比例": 0,
-                "底牌列表": [],
-                "可用底牌": []
-            }
+            ability_state = self._default_ability_state()
             self.logger.info("创建新的能力状态文件")
 
         return ability_state
@@ -105,7 +145,7 @@ class ResourceSettler:
         """
         warnings = []
 
-        for resource, value in inventory.items():
+        for resource, value in inventory.get("resources", {}).items():
             if value < 0:
                 warnings.append({
                     "resource": resource,
@@ -133,7 +173,13 @@ class ResourceSettler:
             卡片文本，未找到返回None
         """
         chapters_dir = self.project_dir / "chapters" / f"vol{vol:02d}"
-        chapter_file = chapters_dir / "cards" / f"ch{ch:02d}_card.md"
+        candidates = [
+            chapter_card_file(self.project_dir, vol, ch),
+            chapters_dir / "cards" / f"ch{ch:03d}_card.md",
+            chapters_dir / "cards" / f"chapter_card_ch{ch:02d}.md",
+        ]
+
+        chapter_file = next((path for path in candidates if path.exists()), candidates[0])
 
         if not chapter_file.exists():
             self.logger.error(f"卡片文件不存在: {chapter_file}")
@@ -153,11 +199,16 @@ class ResourceSettler:
         all_deltas = {}
 
         # 提取资源卡
-        resource_card = extract_section(card_text, "### 3. 资源卡")
+        resource_card = extract_section(card_text, RESOURCE_CARD)
         if resource_card:
-            deltas = self.parse_deltas(resource_card)
-            for k, v in deltas.items():
-                all_deltas[k] = all_deltas.get(k, 0) + v
+            resource_bullets = extract_bullets(resource_card)
+            for field in [FIELD_RESOURCE_GAIN, FIELD_RESOURCE_SPEND, FIELD_RESOURCE_LOSS]:
+                value = resource_bullets.get(field, "")
+                if not value:
+                    continue
+                deltas = self.parse_deltas(value)
+                for k, v in deltas.items():
+                    all_deltas[k] = all_deltas.get(k, 0) + v
 
         return all_deltas
 
@@ -173,22 +224,21 @@ class ResourceSettler:
         updates = {}
 
         # 提取战力卡（POWER_SYSTEM项目）
-        power_card = extract_section(card_text, "### 2. 战力卡")
+        power_card = extract_section(card_text, POWER_CARD)
         if power_card:
+            power_bullets = extract_bullets(power_card)
+
             # 解析战力损耗比例
-            loss_pattern = r'战力损耗比例[：:]\s*[+-]?(\d+)%?'
-            match = re.search(loss_pattern, power_card)
-            if match:
-                updates["战力损耗比例"] = int(match.group(1))
+            loss_ratio = power_bullets.get(FIELD_POWER_LOSS_RATIO, "")
+            parsed_loss = parse_power_loss_ratio(loss_ratio) if loss_ratio else None
+            if parsed_loss is not None:
+                updates["战力损耗比例"] = parsed_loss
 
             # 解析底牌名称
-            trump_pattern = r'使用的底牌名称[：:]\s*(.+)'
-            match = re.search(trump_pattern, power_card)
-            if match:
-                trump_text = match.group(1).strip()
-                trump_list = [t.strip() for t in trump_text.split("/") if t.strip()]
-                if trump_list:
-                    updates["底牌列表"] = trump_list
+            trump_text = power_bullets.get(FIELD_POWER_TRUMP_NAME, "")
+            trump_list = split_trump_names(trump_text) if trump_text else []
+            if trump_list:
+                updates["底牌列表"] = trump_list
 
         return updates
 
@@ -205,6 +255,7 @@ class ResourceSettler:
         result = {
             "chapter": f"vol{vol:02d}/ch{ch:02d}",
             "success": False,
+            "skipped": False,
             "resource_changes": [],
             "ability_updates": [],
             "warnings": [],
@@ -229,14 +280,26 @@ class ResourceSettler:
         if ability_updates:
             self.logger.info(f"解析到能力更新: {ability_updates}")
 
-        # 4. 加载库存
+        # 4. 加载状态文件
         inventory = self.load_or_create_inventory()
+        ability_state = self.load_or_create_ability_state()
+
+        chapter_id = result["chapter"]
+        already_applied = (
+            chapter_id in inventory.get("applied_chapters", [])
+            or chapter_id in ability_state.get("applied_chapters", [])
+        )
+        if already_applied:
+            result["success"] = True
+            result["skipped"] = True
+            self.logger.info(f"章节已结算，跳过重复处理: {chapter_id}")
+            return result
 
         # 5. 计算资源变化
         for resource, delta in resource_deltas.items():
-            before = inventory.get(resource, 0)
+            before = inventory["resources"].get(resource, 0)
             after = before + delta
-            inventory[resource] = after
+            inventory["resources"][resource] = after
 
             result["resource_changes"].append({
                 "resource": resource,
@@ -250,25 +313,27 @@ class ResourceSettler:
         result["warnings"] = warnings
 
         # 7. 保存资源库存
+        inventory["last_updated_chapter"] = chapter_id
+        inventory["applied_chapters"] = list(dict.fromkeys([*inventory.get("applied_chapters", []), chapter_id]))
         save_json_file(self.inventory_file, inventory)
         self.logger.info(f"保存资源库存: {self.inventory_file}")
 
         # 8. 更新能力状态
-        if ability_updates:
-            ability_state = self.load_or_create_ability_state()
+        if "战力损耗比例" in ability_updates:
+            ability_state["战力损耗比例"] = ability_updates["战力损耗比例"]
 
-            if "战力损耗比例" in ability_updates:
-                ability_state["战力损耗比例"] = ability_updates["战力损耗比例"]
+        if "底牌列表" in ability_updates:
+            existing = ability_state.get("底牌列表", [])
+            merged = list(dict.fromkeys([*existing, *ability_updates["底牌列表"]]))
+            ability_state["底牌列表"] = merged
+            ability_state["可用底牌"] = list(dict.fromkeys([*ability_state.get("可用底牌", []), *ability_updates["底牌列表"]]))
 
-            if "底牌列表" in ability_updates:
-                # 追加新底牌
-                existing = set(ability_state.get("底牌列表", []))
-                new = set(ability_updates["底牌列表"])
-                ability_state["底牌列表"] = list(existing | new)
+        ability_state["last_updated_chapter"] = chapter_id
+        ability_state["applied_chapters"] = list(dict.fromkeys([*ability_state.get("applied_chapters", []), chapter_id]))
 
-            save_json_file(self.ability_file, ability_state)
-            result["ability_updates"] = ability_updates
-            self.logger.info(f"保存能力状态: {self.ability_file}")
+        save_json_file(self.ability_file, ability_state)
+        result["ability_updates"] = ability_updates
+        self.logger.info(f"保存能力状态: {self.ability_file}")
 
         # 9. 记录日志
         self._append_to_log(result)

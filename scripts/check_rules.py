@@ -7,6 +7,16 @@ import re
 from collections import Counter, defaultdict
 from typing import Optional
 
+from card_names import CARRY_CARD, EMOTION_CARD, PLOT_CARD, RESOURCE_CARD, STATUS_CARD
+from card_fields import (
+    FIELD_CARRY_SETUP,
+    FIELD_EMOTION_START,
+    FIELD_EMOTION_TARGET,
+    FIELD_PLOT_EVENT,
+    FIELD_RESOURCE_SETUP,
+    FIELD_STATUS_EMOTION,
+    FIELD_STATUS_GOAL,
+)
 from card_parser import extract_body, extract_section, extract_bullets
 from rule_engine import CheckResult
 
@@ -167,29 +177,29 @@ def _extract_setups_from_cards(chapters: list[tuple[int, str]]) -> tuple[list[di
     for chapter_num, content in chapters:
         source = f"ch{chapter_num:03d}"
 
-        resource_card = extract_bullets(extract_section(content, "### 3. 资源卡"))
-        if resource_card.get("伏笔"):
+        resource_card = extract_bullets(extract_section(content, RESOURCE_CARD))
+        if resource_card.get(FIELD_RESOURCE_SETUP):
             open_setups.append({
                 "id": f"{source}_setup",
-                "content": resource_card["伏笔"],
+                "content": resource_card[FIELD_RESOURCE_SETUP],
                 "source": source,
                 "chapter": chapter_num,
             })
 
-        plot_card = extract_bullets(extract_section(content, "### 2. 情节卡"))
-        if plot_card.get("关键事件"):
+        plot_card = extract_bullets(extract_section(content, PLOT_CARD))
+        if plot_card.get(FIELD_PLOT_EVENT):
             resolved_setups.append({
                 "id": f"{source}_resolved",
-                "content": plot_card["关键事件"],
+                "content": plot_card[FIELD_PLOT_EVENT],
                 "source": source,
                 "chapter": chapter_num,
             })
 
-        carry_card = extract_bullets(extract_section(content, "### 6. 承上启下卡"))
-        if carry_card.get("铺垫"):
+        carry_card = extract_bullets(extract_section(content, CARRY_CARD))
+        if carry_card.get(FIELD_CARRY_SETUP):
             open_setups.append({
                 "id": f"{source}_setup_carry",
-                "content": carry_card["铺垫"],
+                "content": carry_card[FIELD_CARRY_SETUP],
                 "source": source,
                 "chapter": chapter_num,
             })
@@ -418,19 +428,19 @@ def _check_emotional_arc(chapters: list[tuple[int, str]], mode: str) -> CheckRes
     emotion_pairs: list[dict] = []
 
     for chapter_num, content in chapters:
-        emotion_card = extract_bullets(extract_section(content, "### 5. 情感弧卡"))
-        if emotion_card.get("起始情绪") and emotion_card.get("目标情绪"):
+        emotion_card = extract_bullets(extract_section(content, EMOTION_CARD))
+        if emotion_card.get(FIELD_EMOTION_START) and emotion_card.get(FIELD_EMOTION_TARGET):
             emotion_pairs.append({
                 "chapter": chapter_num,
-                "start": emotion_card["起始情绪"],
-                "target": emotion_card["目标情绪"],
+                "start": emotion_card[FIELD_EMOTION_START],
+                "target": emotion_card[FIELD_EMOTION_TARGET],
             })
 
     if len(emotion_pairs) < 2:
         return CheckResult("情绪弧", True, "数据不足", "需要至少2章情感弧数据")
 
-    state_card = extract_bullets(extract_section(chapters[-1][1], "### 1. 状态卡"))
-    final_emotion = state_card.get("主角当前情绪", "")
+    state_card = extract_bullets(extract_section(chapters[-1][1], STATUS_CARD))
+    final_emotion = state_card.get(FIELD_STATUS_EMOTION, "")
 
     if final_emotion:
         first_start = emotion_pairs[0]["start"]
@@ -453,10 +463,10 @@ def _check_goal_progression(chapters: list[tuple[int, str]], mode: str) -> Check
 
     for chapter_num, content in chapters:
         state_card = extract_bullets(extract_section(content, "### 1. 状态卡"))
-        if state_card.get("主角当前目标"):
+        if state_card.get(FIELD_STATUS_GOAL):
             goals.append({
                 "chapter": chapter_num,
-                "goal": state_card["主角当前目标"],
+                "goal": state_card[FIELD_STATUS_GOAL],
             })
 
     if len(goals) < 2:

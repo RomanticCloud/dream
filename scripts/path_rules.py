@@ -11,8 +11,15 @@ def volume_dir(project_dir: Path, vol_num: int) -> Path:
 
 
 def chapter_file(project_dir: Path, vol_num: int, ch_num: int, title: str | None = None) -> Path:
-    suffix = title or f"第{ch_num}章"
-    return volume_dir(project_dir, vol_num) / f"{ch_num:03d}_{suffix}.md"
+    return volume_dir(project_dir, vol_num) / f"ch{ch_num:02d}.md"
+
+
+def cards_dir(project_dir: Path, vol_num: int) -> Path:
+    return volume_dir(project_dir, vol_num) / "cards"
+
+
+def chapter_card_file(project_dir: Path, vol_num: int, ch_num: int) -> Path:
+    return cards_dir(project_dir, vol_num) / f"ch{ch_num:02d}_card.md"
 
 
 def draft_prompt_file(project_dir: Path, vol_num: int, ch_num: int) -> Path:
@@ -25,6 +32,10 @@ def regen_prompt_file(project_dir: Path, vol_num: int, ch_num: int) -> Path:
 
 def polish_prompt_file(project_dir: Path, vol_num: int, ch_num: int) -> Path:
     return volume_dir(project_dir, vol_num) / f"{ch_num:03d}_polish_prompt.md"
+
+
+def rewrite_card_prompt_file(project_dir: Path, vol_num: int, ch_num: int) -> Path:
+    return volume_dir(project_dir, vol_num) / f"{ch_num:03d}_rewrite_card_prompt.md"
 
 
 def volume_memory_dir(project_dir: Path) -> Path:

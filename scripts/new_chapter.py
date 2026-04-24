@@ -16,13 +16,54 @@ from pathlib import Path
 from datetime import datetime
 
 from card_parser import extract_section, extract_bullets
+from card_names import CARRY_CARD, EMOTION_CARD, PLOT_CARD
+from card_fields import (
+    FIELD_CARRY_HOOK,
+    FIELD_CARRY_LIMIT,
+    FIELD_CARRY_MUST,
+    FIELD_CARRY_PAYOFF,
+    FIELD_CARRY_SETUP,
+    FIELD_EMOTION_PROCESS,
+    FIELD_EMOTION_START,
+    FIELD_EMOTION_SUSPENSE,
+    FIELD_EMOTION_TARGET,
+    FIELD_PLOT_CONFLICT,
+    FIELD_PLOT_EVENT,
+    FIELD_PLOT_PAYOFF,
+    FIELD_PLOT_SETUP,
+    FIELD_PLOT_TURN,
+    FIELD_RELATION_CHANGE,
+    FIELD_RELATION_MAIN,
+    FIELD_RESOURCE_CARRY,
+    FIELD_RESOURCE_GAIN,
+    FIELD_RESOURCE_LOSS,
+    FIELD_RESOURCE_SETUP,
+    FIELD_RESOURCE_SPEND,
+    FIELD_STATUS_CHANGE,
+    FIELD_STATUS_ELAPSED,
+    FIELD_STATUS_EMOTION,
+    FIELD_STATUS_GOAL,
+    FIELD_STATUS_INJURY,
+    FIELD_STATUS_LOCATION,
+    FIELD_STATUS_TIMEPOINT,
+)
+from chapter_scan import chapter_file_by_number
 from chapter_validator import validate_chapter, print_result, fix_time_logic_and_revalidate
-from common_io import load_project_state, load_volume_outline
+from common_io import (
+    ProjectStateError,
+    load_project_state,
+    load_volume_outline,
+    require_chapter_word_range,
+    require_locked_protagonist_gender,
+    save_json_file,
+)
 from narrative_context import NarrativeContext
+from revision_state import get_chapter_revision_status, get_chapter_revision_tasks
 from state_tracker import StateTracker
-from path_rules import chapter_file, draft_prompt_file
+from path_rules import chapter_file, chapter_card_file, draft_prompt_file
 from progress_rules import get_current_progress, get_next_chapter
 from subagent_chapter_generator import SubagentChapterGenerator
+from task_dispatcher import TaskChapterDispatcher, TaskResultError
 from global_clock import GlobalClock
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -109,13 +150,22 @@ def get_genre_description(genres: list) -> str:
     return "、".join(descriptions[:2])
 
 
+def get_locked_word_range(state: dict) -> tuple[int, int, int]:
+    min_words, max_words = require_chapter_word_range(state)
+    return min_words, max_words, (min_words + max_words) // 2
+
+
+def ensure_writing_prerequisites(state: dict) -> None:
+    require_chapter_word_range(state)
+    require_locked_protagonist_gender(state)
+
+
 def replace_template_variables(template: str, state: dict, vol_num: int, ch_num: int) -> str:
     """替换模板中的变量"""
     specs = state.get("basic_specs", {})
     positioning = state.get("positioning", {})
     
-    min_words = specs.get("chapter_length_min", specs.get("min_words", 3500))
-    max_words = specs.get("chapter_length_max", specs.get("max_words", 4500))
+    min_words, max_words, _ = get_locked_word_range(state)
     
     # 计算骨架字数
     opening_min = int(min_words * 0.15)
@@ -153,29 +203,14 @@ def replace_template_variables(template: str, state: dict, vol_num: int, ch_num:
 
 def load_last_chapter_carry(project_dir: Path, vol_name: str, last_ch_num: int) -> dict:
     """加载上一章的承接信息"""
-    chapters_dir = project_dir / "chapters" / vol_name
-    if not chapters_dir.exists():
-        return {}
-    
-    # 尝试多种文件命名格式
-    patterns = [
-        f"{last_ch_num:03d}_*.md",
-        f"chapter_{last_ch_num:02d}.md",
-        f"chapter_{last_ch_num}.md",
-    ]
-    
-    for pattern in patterns:
-        matches = list(chapters_dir.glob(pattern))
-        if matches:
-            last_file = sorted(matches, key=lambda p: p.stat().st_mtime, reverse=True)[0]
-            content = last_file.read_text(encoding="utf-8")
-            # 尝试多种承接卡标题
-            for carry_title in ["### 6. 承接卡", "### 6. 承上启下卡"]:
-                carry_section = extract_section(content, carry_title)
-                if carry_section:
-                    return extract_bullets(carry_section)
-            return {}
-    
+    vol_num = int(vol_name.replace("vol", ""))
+    last_file = chapter_file_by_number(project_dir, vol_num, last_ch_num)
+    if last_file and last_file.exists():
+        content = last_file.read_text(encoding="utf-8")
+        carry_section = extract_section(content, CARRY_CARD)
+        if carry_section:
+            return extract_bullets(carry_section)
+
     return {}
 
 
@@ -214,6 +249,57 @@ def render_memory_lines(items, limit: int = 4) -> str:
     return "\n".join(f"- {item}" for item in picked)
 
 
+def render_revision_tasks(tasks: list[dict], limit: int = 5) -> str:
+    if not tasks:
+        return ""
+    severity_order = {"error": 0, "warning": 1, "info": 2}
+    sorted_tasks = sorted(tasks, key=lambda item: (severity_order.get(item.get("severity", "info"), 9), item.get("fix_method", "polish")))
+    lines = []
+    for task in sorted_tasks[:limit]:
+        label = f"[{task.get('severity', 'info')}][{task.get('fix_method', 'polish')}]"
+        location = " / ".join(part for part in [task.get("card", ""), task.get("field", "")] if part)
+        rewrite_target = task.get("rewrite_target")
+        if not rewrite_target:
+            rewrite_target = {
+                "regenerate": "full_chapter",
+                "rewrite_card": "work_cards_only",
+                "polish": "local_patch",
+            }.get(task.get("fix_method", "polish"), "local_patch")
+        blocking = task.get("blocking")
+        if blocking is None:
+            blocking = task.get("severity") == "error"
+        constraints = task.get("preserve_constraints") or (
+            ["工作卡必须与正文一致"] if rewrite_target == "work_cards_only" else
+            ["保留本章核心事件", "保留章节结尾结果"] if rewrite_target == "full_chapter" else
+            ["不改变主事件与章节结构"]
+        )
+        extras = []
+        extras.append(f"目标={rewrite_target}")
+        extras.append(f"阻塞={'是' if blocking else '否'}")
+        if task.get("priority"):
+            extras.append(f"优先级={task['priority']}")
+        if location:
+            line = f"- {label} {location}：{task.get('instruction', task.get('message', ''))}"
+        else:
+            line = f"- {label} {task.get('instruction', task.get('message', ''))}"
+        if extras:
+            line += f" ({'; '.join(extras)})"
+        lines.append(line)
+        if constraints:
+            lines.append(f"  保留约束：{'；'.join(constraints)}")
+    return "\n".join(lines)
+
+
+def render_revision_mode_guidance(status: str | None) -> str:
+    if status == "pending_regenerate":
+        return "## 本轮修正模式：整章重写\n- 必须整章重写正文与工作卡，不能只做局部补丁。\n- 优先解决所有 error，再处理 warning。"
+    if status == "pending_rewrite_card":
+        return "## 本轮修正模式：重写工作卡\n- 正文尽量保持不变，重点重写 `## 内部工作卡`。\n- 工作卡必须严格对齐现有正文，不得脱离正文另写新剧情。"
+    if status == "pending_polish":
+        return "## 本轮修正模式：局部润色\n- 不改变主事件与章节结构，只修局部问题。\n- 优先修复 warning 和格式细节，避免整章重写。"
+    return ""
+
+
 def create_chapter_scaffold(
     project_dir: Path,
     vol_num: int,
@@ -224,13 +310,14 @@ def create_chapter_scaffold(
     """创建章节支架文件"""
     chapters_dir = project_dir / "chapters" / vol_name
     chapters_dir.mkdir(parents=True, exist_ok=True)
-    
+
     chapter_path = chapter_file(project_dir, vol_num, ch_num)
+    card_path = chapter_card_file(project_dir, vol_num, ch_num)
+    card_path.parent.mkdir(parents=True, exist_ok=True)
     
     specs = state.get("basic_specs", {})
-    min_words = specs.get("chapter_length_min", specs.get("min_words", 3500))
-    max_words = specs.get("chapter_length_max", specs.get("max_words", 4500))
-    draft_target = (min_words + max_words) // 2
+    ensure_writing_prerequisites(state)
+    min_words, max_words, draft_target = get_locked_word_range(state)
     pacing = specs.get("pacing", "偏快")
     
     positioning = state.get("positioning", {})
@@ -252,7 +339,7 @@ def create_chapter_scaffold(
     open_setups = normalize_memory_items(running_memory.get("open_setups", []))
     previous_volume_memory = load_volume_memory(project_dir, max(vol_num - 1, 1)) if vol_num > 1 else {}
     
-    template = f"""# 第{ch_num}章
+    content_template = f"""# 第{ch_num}章
 
 ## 章节卡
 
@@ -281,39 +368,54 @@ def create_chapter_scaffold(
 
 ---
 
-## 内部工作卡
+"""
+
+    card_template = f"""## 内部工作卡
 
 ### 1. 状态卡
-- 主角当前位置：{main_scene}
-- 主角当前情绪：
-- 主角当前目标：
-- 本章结束后的状态变化：
+- {FIELD_STATUS_LOCATION}：{main_scene}
+- {FIELD_STATUS_INJURY}：
+- {FIELD_STATUS_EMOTION}：
+- {FIELD_STATUS_GOAL}：
+- {FIELD_STATUS_CHANGE}：
+- {FIELD_STATUS_ELAPSED}：
+- {FIELD_STATUS_TIMEPOINT}：
 
-### 2. 情节卡
-- 核心冲突：
-- 关键事件：
-- 转折点：
+{PLOT_CARD}
+- {FIELD_PLOT_CONFLICT}：
+- {FIELD_PLOT_EVENT}：
+- {FIELD_PLOT_TURN}：
+- {FIELD_PLOT_SETUP}：
+- {FIELD_PLOT_PAYOFF}：
 
 ### 3. 资源卡
-- 获得：
-- 消耗：
-- 伏笔：
+- {FIELD_RESOURCE_GAIN}：
+- {FIELD_RESOURCE_SPEND}：
+- {FIELD_RESOURCE_LOSS}：
+- {FIELD_RESOURCE_CARRY}：
+- {FIELD_RESOURCE_SETUP}：
 
 ### 4. 关系卡
-- 主要人物：
-- 人物变化：
+- {FIELD_RELATION_MAIN}：
+- {FIELD_RELATION_CHANGE}：
 
-### 5. 情感弧卡
-- 起始情绪：
-- 变化过程：
-- 目标情绪：
+{EMOTION_CARD}
+- {FIELD_EMOTION_START}：
+- {FIELD_EMOTION_PROCESS}：
+- {FIELD_EMOTION_TARGET}：
+- {FIELD_EMOTION_SUSPENSE}：
 
-### 6. 承上启下卡
-- 承接：{carry.get('下章必须接住什么', '')}
-- 铺垫：
+{CARRY_CARD}
+- {FIELD_CARRY_MUST}：{carry.get(FIELD_CARRY_MUST, '')}
+- {FIELD_CARRY_LIMIT}：
+- {FIELD_CARRY_PAYOFF}：
+- {FIELD_CARRY_SETUP}：
+- {FIELD_CARRY_HOOK}：
 
 """
-    chapter_path.write_text(template, encoding="utf-8")
+
+    chapter_path.write_text(content_template, encoding="utf-8")
+    card_path.write_text(card_template, encoding="utf-8")
     return chapter_path
 
 
@@ -335,12 +437,11 @@ def generate_dynamic_content(
     state_summary = state_tracker.get_state_summary(ch_num)
 
     specs = state.get("basic_specs", {})
+    ensure_writing_prerequisites(state)
     positioning = state.get("positioning", {})
     world = state.get("world", {})
     
-    min_words = specs.get("chapter_length_min", specs.get("min_words", 3500))
-    max_words = specs.get("chapter_length_max", specs.get("max_words", 4500))
-    draft_target = (min_words + max_words) // 2
+    min_words, max_words, draft_target = get_locked_word_range(state)
     pacing = specs.get("pacing", "偏快")
     
     main_conflicts = positioning.get("main_conflicts", [])
@@ -367,6 +468,8 @@ def generate_dynamic_content(
     unverified_claims = normalize_memory_items(running_memory.get("unverified_claims", previous_volume_memory.get("unverified_claims", [])))
     latest_final_state = running_memory.get("latest_final_state", {})
     conflicts = running_memory.get("conflicts", previous_volume_memory.get("conflicts", []))
+    revision_status = get_chapter_revision_status(project_dir, vol_num, ch_num)
+    revision_tasks = get_chapter_revision_tasks(project_dir, vol_num, ch_num)
     
     prompt = f"""## 项目信息
 - 书名：{book_title}
@@ -440,6 +543,15 @@ def generate_dynamic_content(
         prompt += f"""
 ## 遗留悬念
 - 本章留下的钩子：{carry['本章留下的最强钩子是什么']}
+"""
+
+    if revision_tasks:
+        mode_guidance = render_revision_mode_guidance(revision_status)
+        prompt += f"""
+{mode_guidance}
+
+## 本轮修正要求
+{render_revision_tasks(revision_tasks)}
 """
     
     # 新增：场景锚点
@@ -616,9 +728,7 @@ def generate_fallback_prompt(
     state: dict
 ) -> str:
     """当模板文件不存在时的备用提示生成"""
-    specs = state.get("basic_specs", {})
-    min_words = specs.get("chapter_length_min", specs.get("min_words", 3500))
-    max_words = specs.get("chapter_length_max", specs.get("max_words", 4500))
+    min_words, max_words, _ = get_locked_word_range(state)
     
     include_power_system = should_include_power_system(state)
     dynamic_content = generate_dynamic_content(
@@ -643,7 +753,7 @@ def generate_fallback_prompt(
 - **钩子**: 结尾必须有继续追读的悬念
 
 ### 专业级创作约束
-- **连续写作原则**: 写完本章后必须为下一章留下可执行承接卡
+- **连续写作原则**: 写完本章后必须为下一章留下可执行承上启下卡
 - **慢节奏叙事原则**: 10章推进1步剧情，每章内部用感官填满每个瞬间
 - **场景颗粒度**: 每个瞬间用至少一个感官通道（视觉/听觉/触觉/嗅觉/内心）描写
 - **情绪过山车**: 每章必须有情感波动，不能平铺直叙
@@ -702,7 +812,7 @@ def validate_chapter_interactive(
             try:
                 from global_clock import GlobalClock
                 clock = GlobalClock(project_dir)
-                card_file = project_dir / "chapters" / f"vol{vol_num:02d}" / "cards" / f"ch{ch_num:02d}_card.md"
+                card_file = chapter_card_file(project_dir, vol_num, ch_num)
                 if card_file.exists():
                     clock.advance_from_card(card_file, vol_num, ch_num)
                     print(f"✅ 时间轴已推进")
@@ -710,7 +820,7 @@ def validate_chapter_interactive(
                     # 记录里程碑
                     try:
                         content = card_file.read_text(encoding="utf-8")
-                        plot_card = extract_section(content, "### 2. 情节卡")
+                        plot_card = extract_section(content, PLOT_CARD)
                         if plot_card:
                             events = re.findall(r'[\d]+\.\s*(.+?)(?=\n|$)', plot_card)
                             if events:
@@ -745,7 +855,7 @@ def validate_chapter_interactive(
                     print(f"  - {issue.message}")
 
         # 打印高严重度问题
-        if result.fix_plan:
+        if result.fix_plan and not result.revision_tasks:
             if result.fix_plan.get("total_regenerate", 0) > 0:
                 print("\n【高严重度问题】需整章重写:")
                 for item in result.fix_plan["regenerate"]:
@@ -754,6 +864,15 @@ def validate_chapter_interactive(
                 print("\n【低严重度问题】AI润色:")
                 for item in result.fix_plan["ai_polish"]:
                     print(f"  - {item['name']}: {item['details']}")
+        if result.revision_tasks:
+            print("\n【结构化修正任务】")
+            for task in result.revision_tasks[:5]:
+                label = f"[{task.get('severity', 'info')}][{task.get('fix_method', 'polish')}]"
+                location = " / ".join(part for part in [task.get("card", ""), task.get("field", "")] if part)
+                print(f"  - {label} {location}: {task.get('instruction', task.get('message', ''))}".rstrip())
+            targets = {task.get("rewrite_target") for task in result.revision_tasks}
+            auto_target = "full_chapter" if "full_chapter" in targets else "work_cards_only" if "work_cards_only" in targets else "local_patch"
+            print(f"\n【自动执行目标】{auto_target}")
 
         # 询问用户
         if attempt < max_retries:
@@ -784,7 +903,7 @@ def generate_chapter_with_subagent(
     ch_num: int,
     lookback: int = 0
 ) -> dict:
-    """使用子代理生成章节（文件路径模式）
+    """准备 Task/子代理章节生成请求。
 
     Args:
         project_dir: 项目目录
@@ -794,32 +913,19 @@ def generate_chapter_with_subagent(
 
     Returns:
         {
-            "status": "prompt_ready" | "error",
+            "status": "task_request_ready" | "error",
             "prompt_file": "提示文件路径",
-            "prompt_length": 500
+            "prompt_length": 500,
+            "request_file": "任务请求文件路径"
         }
     """
-    import time
-    start_time = time.time()
+    dispatcher = TaskChapterDispatcher(project_dir)
+    result = dispatcher.dispatch(vol_num, ch_num, lookback)
+    if isinstance(result, dict):
+        return result
 
-    generator = SubagentChapterGenerator(project_dir)
-
-    # 使用文件路径模式生成提示
-    prompt = generator.generate_file_based_prompt(vol_num, ch_num)
-
-    # 保存提示到文件
-    prompt_file = project_dir / "context" / "subagent_prompt.md"
-    prompt_file.parent.mkdir(exist_ok=True)
-    prompt_file.write_text(prompt, encoding="utf-8")
-
-    generation_time = time.time() - start_time
-
-    return {
-        "status": "prompt_ready",
-        "prompt_file": str(prompt_file),
-        "prompt_length": len(prompt),
-        "generation_time": generation_time,
-    }
+    save_json_file(project_dir / "context" / "latest_generation_manifest.json", result.__dict__)
+    return result.__dict__
 
 
 def main():
@@ -831,9 +937,9 @@ def main():
 
     示例:
         new_chapter.py .                          # 自动检测下一章
-        new_chapter.py . --auto                   # 自动生成模式
-        new_chapter.py . --prompt-only            # 仅生成提示
-        new_chapter.py . --subagent               # 子代理模式生成
+        new_chapter.py . --auto                   # 默认子代理链路 + 自动验证说明
+        new_chapter.py . --prompt-only            # 仅生成子代理提示
+        new_chapter.py . --subagent               # 兼容参数，行为同默认
         new_chapter.py . --subagent --lookback 5  # 子代理模式，回溯5章
         new_chapter.py . --subagent --auto-validate  # 子代理模式+自动验证
         new_chapter.py . --subagent --auto-validate --max-retries 5  # 最多重试5次
@@ -845,11 +951,11 @@ def main():
         print('用法: new_chapter.py <项目目录> [选项]')
         print('')
         print('选项:')
-        print('  --auto              自动生成模式（生成提示供对话使用）')
-        print('  --prompt-only       仅生成起草提示，不创建支架')
-        print('  --subagent          使用子代理模式生成章节')
+        print('  --auto              默认子代理模式 + 自动验证说明')
+        print('  --prompt-only       仅生成子代理提示，不创建支架')
+        print('  --subagent          兼容参数，正文生成默认即走子代理模式')
         print('  --separate          自动分离章节内容和工作卡')
-        print('  --lookback N        回溯章节数（0=全部，默认0）')
+        print('  --lookback N        兼容参数；subagent 主链路始终读取全部前文')
         print('  --auto-validate     生成后自动验证章节质量')
         print('  --max-retries N     验证失败最大重试次数（默认3）')
         print('  [vol] [ch]          指定卷和章（如: 1 5 表示第1卷第5章）')
@@ -867,11 +973,11 @@ def main():
         print('用法: new_chapter.py <项目目录> [选项]')
         print('')
         print('选项:')
-        print('  --auto              自动生成模式（生成提示供对话使用）')
-        print('  --prompt-only       仅生成起草提示，不创建支架')
-        print('  --subagent          使用子代理模式生成章节')
+        print('  --auto              默认子代理模式 + 自动验证说明')
+        print('  --prompt-only       仅生成子代理提示，不创建支架')
+        print('  --subagent          兼容参数，正文生成默认即走子代理模式')
         print('  --separate          自动分离章节内容和工作卡')
-        print('  --lookback N        回溯章节数（0=全部，默认0）')
+        print('  --lookback N        兼容参数；subagent 主链路始终读取全部前文')
         print('  --auto-validate     生成后自动验证章节质量')
         print('  --max-retries N     验证失败最大重试次数（默认3）')
         print('  [vol] [ch]          指定卷和章（如: 1 5 表示第1卷第5章）')
@@ -909,13 +1015,20 @@ def main():
         print("\n✅ 初始化完成，请重新运行命令")
         sys.exit(0)
 
-    # 解析参数（先解析 --subagent 和 --lookback，因为子代理模式不需要 state）
-    subagent_mode = False
+    try:
+        ensure_writing_prerequisites(state)
+    except ProjectStateError as exc:
+        print(f"项目配置不完整：{exc}")
+        sys.exit(1)
+
+    # 解析参数
+    subagent_mode = True
     separate_mode = False
     lookback = 0
     auto_mode = False
     prompt_only = False
     auto_validate = False
+    consume_result_file = None
     max_retries = 3
     vol_num = None
     ch_num = None
@@ -939,6 +1052,13 @@ def main():
                 sys.exit(1)
         elif arg == "--auto-validate":
             auto_validate = True
+        elif arg == "--consume-task-result-file":
+            try:
+                _, next_val = next(args_iter)
+                consume_result_file = next_val
+            except StopIteration:
+                print("错误：--consume-task-result-file 需要一个文件路径参数")
+                sys.exit(1)
         elif arg == "--max-retries":
             try:
                 _, next_val = next(args_iter)
@@ -964,11 +1084,44 @@ def main():
             ch_num = 1
         vol_name = f"vol{vol_num:02d}"
 
-    # 子代理模式
+    if consume_result_file:
+        dispatcher = TaskChapterDispatcher(project_dir)
+        try:
+            raw_result = Path(consume_result_file).expanduser().resolve().read_text(encoding="utf-8")
+            consume = dispatcher.consume_task_result(vol_num, ch_num, raw_result, validate=True)
+        except FileNotFoundError:
+            print(f"Task 结果文件不存在: {consume_result_file}")
+            sys.exit(1)
+        except TaskResultError as exc:
+            print(f"Task 结果不合法: {exc}")
+            sys.exit(1)
+
+        print(f"\n{'='*60}")
+        print(f"Task 结果消费：第{vol_num}卷第{ch_num}章")
+        print(f"{'='*60}\n")
+        print(f"正文文件: {consume.body_output}")
+        print(f"工作卡文件: {consume.card_output}")
+        if consume.validation_passed:
+            print("✅ 章节验证通过")
+            sys.exit(0)
+        print("❌ 章节验证失败")
+        for issue in consume.issues[:10]:
+            print(f"  - {issue}")
+        sys.exit(1)
+
+    # 子代理模式（默认主链路）
     if subagent_mode:
         print(f"\n{'='*60}")
-        print(f"子代理模式：生成第{vol_num}卷第{ch_num}章")
+        print(f"子代理主链路：生成第{vol_num}卷第{ch_num}章")
         print(f"{'='*60}\n")
+
+        if lookback != 0:
+            print(f"提示：subagent 主链路已强制切换为读取全部前文，已忽略 --lookback {lookback}")
+
+        if not prompt_only:
+            chapter_path = create_chapter_scaffold(project_dir, vol_num, ch_num, vol_name, state)
+            print(f"章节支架已创建: {chapter_path}")
+            print(f"工作卡支架已创建: {chapter_card_file(project_dir, vol_num, ch_num)}")
 
         result = generate_chapter_with_subagent(
             project_dir,
@@ -977,33 +1130,31 @@ def main():
             lookback
         )
 
-        if result["status"] == "prompt_ready":
-            print(f"✅ 子代理提示已准备就绪")
+        if result["status"] == "task_request_ready":
+            print(f"✅ Task 章节生成请求已准备就绪")
             print(f"   - 提示文件: {result['prompt_file']}")
+            print(f"   - 请求文件: {result['request_file']}")
+            print(f"   - 上下文 manifest: {result['manifest_file']}")
+            print(f"   - context_manifest_id: {result['context_manifest_id']}")
             print(f"   - 提示长度: {result['prompt_length']} 字符")
+            print(f"   - 已装载前文章节: {result['chapters_loaded']} 章")
+            print(f"   - 必读文件总数: {result['required_files']} 个")
             print(f"   - 生成耗时: {result['generation_time']:.2f} 秒")
-            print(f"\n请使用子代理执行以下任务:")
-            print(f"1. 读取提示文件: {result['prompt_file']}")
-            print(f"2. 根据提示中的文件路径读取前文章节（正文+工作卡）")
-            print(f"3. 生成第{ch_num}章内容")
-            print(f"4. 分离输出正文和工作卡到指定路径")
+            print(f"\n后续执行约束:")
+            print(f"1. 使用 Task/子代理先读取提示文件: {result['prompt_file']}")
+            print(f"2. 子代理必须先读取 manifest: {result['manifest_file']}，再按 required_read_sequence 读取全部前文")
+            print(f"3. Task 必须返回严格 JSON，并带上 context_manifest_id 与 files_read")
+            print(f"4. 生成完成后运行: python3 scripts/new_chapter.py {project_dir} {vol_num} {ch_num} --consume-task-result-file <task_result.json>")
+            print(f"5. 正文只写入: {result['body_output']}")
+            print(f"6. 工作卡只写入: {result['card_output']}")
+            print(f"7. 正文文件禁止出现 `## 内部工作卡`")
 
             if auto_validate:
                 print(f"\n{'='*60}")
                 print(f"【自动验证模式】")
                 print(f"{'='*60}")
-                print("生成完成后，将自动验证章节质量...")
-                print("验证失败会询问是否重生成（最多重试{}次）".format(max_retries))
-
-                # 自动验证
-                validation_passed = validate_chapter_interactive(
-                    project_dir, vol_num, ch_num, max_retries, auto_fix=True
-                )
-
-                if validation_passed:
-                    print(f"\n✅ 章节验证通过！")
-                else:
-                    print(f"\n⚠️ 章节验证未通过，请检查生成内容")
+                print("当前仅在 Task 产出正文与工作卡后再执行验证。")
+                print("生成完成后运行：python3 scripts/chapter_validator.py <项目目录> {} {}".format(vol_num, ch_num))
         else:
             print(f"❌ 错误: {result.get('error', '未知错误')}")
 
@@ -1020,9 +1171,9 @@ def main():
 
         if result["status"] == "success":
             print(f"✅ {result['message']}")
-            chapter_file = project_dir / "chapters" / f"vol{vol_num:02d}" / f"ch{ch_num:02d}.md"
-            card_file = project_dir / "chapters" / f"vol{vol_num:02d}" / "cards" / f"ch{ch_num:02d}_card.md"
-            print(f"   - 正文文件: {chapter_file}")
+            content_file = chapter_file(project_dir, vol_num, ch_num)
+            card_file = chapter_card_file(project_dir, vol_num, ch_num)
+            print(f"   - 正文文件: {content_file}")
             print(f"   - 工作卡文件: {card_file}")
         elif result["status"] == "already_separated":
             print(f"✅ {result['message']}")
@@ -1031,56 +1182,7 @@ def main():
 
         return
 
-    state = load_project_state(project_dir)
-    if not state:
-        print("未找到项目状态文件")
-        sys.exit(1)
-
-    print(f"\n{'='*60}")
-    print(f"生成第{vol_num}卷第{ch_num}章起草提示")
-    print(f"{'='*60}\n")
-    
-    # 生成起草提示
-    draft_prompt = generate_draft_prompt(project_dir, vol_num, ch_num, vol_name, state)
-    
-    # 保存提示文件
-    prompt_file = draft_prompt_file(project_dir, vol_num, ch_num)
-    prompt_file.parent.mkdir(parents=True, exist_ok=True)
-    prompt_file.write_text(draft_prompt, encoding="utf-8")
-    print(f"起草提示已保存: {prompt_file}\n")
-    
-    # 创建章节支架（除非--prompt-only）
-    if not prompt_only:
-        chapter_path = create_chapter_scaffold(project_dir, vol_num, ch_num, vol_name, state)
-        print(f"章节支架已创建: {chapter_path}")
-    
-    if auto_mode:
-        print(f"\n{'='*60}")
-        print(f"【自动生成模式】")
-        print(f"{'='*60}")
-        print(f"\n起草提示已保存，请根据提示在对话中生成正文。")
-        print(f"生成完成后，输入'保存'命令写入章节文件。")
-    
-    print(f"\n{'='*40}")
-    print(f"下一步：撰写第{vol_num}卷第{ch_num}章正文")
-    print(f"参考提示文件: {prompt_file}")
-    print(f"{'='*40}")
-    
-    # 显示项目配置
-    specs = state.get("basic_specs", {})
-    min_words = specs.get("chapter_length_min", specs.get("min_words", 3500))
-    max_words = specs.get("chapter_length_max", specs.get("max_words", 4500))
-    print(f"\n质检说明：")
-    print(f"  - 目标字数：{min_words}-{max_words}字")
-    print(f"  - 质量门槛：目标值 × 85% 为通过阈值")
-    print(f"  - 写完后运行: python3 scripts/chapter_validator.py . {vol_num} {ch_num}")
-    
-    # 如果使用了模板，显示提示
-    template = load_prompt_template()
-    if template:
-        print(f"\n提示：已使用模板文件 prompts/chapter-draft.md")
-    else:
-        print(f"\n警告：未找到模板文件 prompts/chapter-draft.md，使用内置提示")
+    return
 
 
 if __name__ == "__main__":

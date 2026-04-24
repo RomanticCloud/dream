@@ -14,6 +14,8 @@ WORD_COUNT_MAP = {
 }
 
 CHAPTER_WORD_MAP = {
+    "2000-2500字": (2000, 2500),
+    "2500-3500字": (2500, 3500),
     "3500-4500字": (3500, 4500),
     "4500-5500字": (4500, 5500),
 }
@@ -30,7 +32,7 @@ def parse_word_target(label: str) -> int:
 
 
 def parse_chapter_length(label: str) -> tuple[int, int]:
-    return CHAPTER_WORD_MAP.get(label, (4000, 5000))
+    return CHAPTER_WORD_MAP.get(label, (3500, 4500))
 
 
 def chapter_word_average(label: str) -> int:

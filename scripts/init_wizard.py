@@ -35,6 +35,8 @@ from state_builders import (
     GENDER_OPTIONS,
     AGE_GROUP_OPTIONS,
     PERSONALITY_OPTIONS,
+    CORE_DESIRE_EXAMPLES,
+    DEEPEST_FEAR_EXAMPLES,
     POWER_SYSTEM_OPTIONS,
     BREAKTHROUGH_OPTIONS,
     LIMITATION_OPTIONS,
@@ -58,8 +60,21 @@ from state_builders import (
     build_power_system,
     build_factions,
 )
+from common_io import ProjectStateError, require_chapter_word_range, require_locked_protagonist_gender
 
 STATE_FILENAME = "wizard_state.json"
+POWER_GENRES = {"都市高武", "玄幻奇幻", "仙侠修真"}
+
+
+def validate_final_state_requirements(state: dict) -> None:
+    """Fail fast when required locked fields are missing before initialization completes."""
+    require_chapter_word_range(state)
+    require_locked_protagonist_gender(state)
+
+
+def persist_wizard_state(base_dir: Path, state: dict) -> None:
+    state_file = base_dir / STATE_FILENAME
+    state_file.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def input_with_default(
@@ -198,18 +213,18 @@ def step_basic_specs(state: dict) -> dict:
     chapter_length = input_choice(
         "单章字数",
         CHAPTER_LENGTH_OPTIONS,
-        "4500-5500字",
+        "3500-4500字",
         saved.get("chapter_length"),
         allow_custom=True,
-        custom_hint="用户输入（如：4000-5000字）",
+        custom_hint="用户输入（如：2500-3500字）",
     )
     if chapter_length not in CHAPTER_LENGTH_OPTIONS:
         parsed = parse_custom_chapter_length(chapter_length)
         if parsed:
             chapter_length = parsed
         else:
-            print("格式无效，已使用默认值 4500-5500字")
-            chapter_length = "4500-5500字"
+            print("格式无效，已使用默认值 3500-4500字")
+            chapter_length = "3500-4500字"
 
     pacing = input_choice(
         "节奏偏好",
@@ -752,21 +767,33 @@ def step_naming(state: dict) -> dict:
     return state
 
 
-def init_wizard(project_name: str) -> dict:
-    state = {
+def init_wizard(project_name: str, base_dir: Path, initial_state: dict | None = None) -> dict:
+    state = initial_state or {
         "_created_at": datetime.now().isoformat(),
         "_project_name": project_name,
         "_current_node": "init",
     }
+    state.setdefault("_project_name", project_name)
+
     step_basic_specs(state)
+    persist_wizard_state(base_dir, state)
     step_positioning(state)
+    persist_wizard_state(base_dir, state)
     step_protagonist(state)
-    step_power_system(state)
+    persist_wizard_state(base_dir, state)
+    if POWER_GENRES.intersection(set(state.get("basic_specs", {}).get("main_genres", []))):
+        step_power_system(state)
+        persist_wizard_state(base_dir, state)
     step_world(state)
+    persist_wizard_state(base_dir, state)
     step_factions(state)
+    persist_wizard_state(base_dir, state)
     step_characters(state)
+    persist_wizard_state(base_dir, state)
     step_volume_architecture(state)
+    persist_wizard_state(base_dir, state)
     step_naming(state)
+    persist_wizard_state(base_dir, state)
 
     print("\n=== 基本规格已锁定 ===")
     specs = state["basic_specs"]
@@ -869,11 +896,18 @@ def main():
         print("项目名不能为空")
         sys.exit(1)
 
-    state = init_wizard(project_name)
+    base_dir = Path.cwd()
+    existing_state = base_dir / STATE_FILENAME
+    initial_state = json.loads(existing_state.read_text(encoding="utf-8")) if existing_state.exists() else None
+    state = init_wizard(project_name, base_dir, initial_state)
 
-    state_file = Path.cwd() / STATE_FILENAME
-    state_file.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"\n状态已保存到: {state_file}")
+    try:
+        validate_final_state_requirements(state)
+    except ProjectStateError as exc:
+        print(f"初始化失败：{exc}")
+        sys.exit(1)
+
+    print(f"\n状态已保存到: {base_dir / STATE_FILENAME}")
 
 
 if __name__ == "__main__":

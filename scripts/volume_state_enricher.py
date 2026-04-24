@@ -9,16 +9,41 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from card_parser import extract_body, extract_bullets, extract_section
+from card_names import CARRY_CARD, EMOTION_CARD, PLOT_CARD, RELATION_CARD, RESOURCE_CARD, STATUS_CARD
+from card_fields import (
+    FIELD_CARRY_MUST,
+    FIELD_CARRY_SETUP,
+    FIELD_EMOTION_TARGET,
+    FIELD_PLOT_EVENT,
+    FIELD_RELATION_CHANGE,
+    FIELD_RESOURCE_GAIN,
+    FIELD_RESOURCE_SETUP,
+    FIELD_RESOURCE_SPEND,
+    FIELD_STATUS_CHANGE,
+    FIELD_STATUS_EMOTION,
+    FIELD_STATUS_GOAL,
+    FIELD_STATUS_LOCATION,
+)
+from card_parser import CARD_MARKER, extract_body, extract_bullets, extract_section
 from chapter_scan import chapter_files_in_volume
 from common_io import load_project_state, load_volume_outline, save_project_state, save_json_file
-from path_rules import project_running_memory_file, volume_memory_dir, volume_memory_json, volume_memory_md
+from path_rules import chapter_card_file, project_running_memory_file, volume_memory_dir, volume_memory_json, volume_memory_md
 
 
 def load_volume_chapters(project_dir: Path, vol_num: int) -> list[tuple[int, Path, str]]:
     chapters = []
     for ch_num, chapter_file in chapter_files_in_volume(project_dir, vol_num):
-        chapters.append((ch_num, chapter_file, chapter_file.read_text(encoding="utf-8")))
+        content = chapter_file.read_text(encoding="utf-8")
+        if CARD_MARKER not in content:
+            card_candidates = [
+                chapter_card_file(project_dir, vol_num, ch_num),
+                chapter_file.parent / "cards" / f"{chapter_file.stem}_card.md",
+            ]
+            for candidate in card_candidates:
+                if candidate.exists():
+                    content = content.rstrip() + "\n\n" + candidate.read_text(encoding="utf-8")
+                    break
+        chapters.append((ch_num, chapter_file, content))
     return chapters
 
 
@@ -123,43 +148,43 @@ def build_volume_memory(project_dir: Path, vol_num: int) -> dict:
         all_names.extend(collect_names(body + "\n" + content))
         all_locations.extend(collect_locations(body))
 
-        state_card = extract_bullets(extract_section(content, "### 1. 状态卡"))
-        plot_card = extract_bullets(extract_section(content, "### 2. 情节卡"))
-        resource_card = extract_bullets(extract_section(content, "### 3. 资源卡"))
-        relation_card = extract_bullets(extract_section(content, "### 4. 关系卡"))
-        emotion_card = extract_bullets(extract_section(content, "### 5. 情感弧卡"))
-        carry_card = extract_bullets(extract_section(content, "### 6. 承上启下卡"))
+        state_card = extract_bullets(extract_section(content, STATUS_CARD))
+        plot_card = extract_bullets(extract_section(content, PLOT_CARD))
+        resource_card = extract_bullets(extract_section(content, RESOURCE_CARD))
+        relation_card = extract_bullets(extract_section(content, RELATION_CARD))
+        emotion_card = extract_bullets(extract_section(content, EMOTION_CARD))
+        carry_card = extract_bullets(extract_section(content, CARRY_CARD))
 
-        if resource_card.get("获得"):
-            append_unique_fact(resource_gained_entries, resource_card["获得"], source)
-            append_unique_fact(stable_facts, f"资源获得：{resource_card['获得']}", source)
-        if resource_card.get("消耗"):
-            append_unique_fact(resource_spent_entries, resource_card["消耗"], source)
-        if resource_card.get("伏笔"):
-            append_unique_fact(open_setups, resource_card["伏笔"], source, "medium")
-        if relation_card.get("人物变化"):
-            append_unique_fact(relationship_changes, relation_card["人物变化"], source)
-            append_unique_fact(stable_facts, f"关系变化：{relation_card['人物变化']}", source)
-        if state_card.get("本章结束后的状态变化"):
-            append_unique_fact(stable_facts, state_card["本章结束后的状态变化"], source)
-        if plot_card.get("关键事件"):
-            chapter_outcomes.append({"chapter": ch_num, "event": plot_card["关键事件"], "source": source})
-            append_unique_fact(resolved_setups, plot_card["关键事件"], source)
-        if emotion_card.get("目标情绪"):
-            append_unique_fact(emotion_arcs, emotion_card["目标情绪"], source, "medium")
-        if carry_card.get("铺垫"):
-            append_unique_fact(open_setups, carry_card["铺垫"], source, "medium")
+        if resource_card.get(FIELD_RESOURCE_GAIN):
+            append_unique_fact(resource_gained_entries, resource_card[FIELD_RESOURCE_GAIN], source)
+            append_unique_fact(stable_facts, f"资源获得：{resource_card[FIELD_RESOURCE_GAIN]}", source)
+        if resource_card.get(FIELD_RESOURCE_SPEND):
+            append_unique_fact(resource_spent_entries, resource_card[FIELD_RESOURCE_SPEND], source)
+        if resource_card.get(FIELD_RESOURCE_SETUP):
+            append_unique_fact(open_setups, resource_card[FIELD_RESOURCE_SETUP], source, "medium")
+        if relation_card.get(FIELD_RELATION_CHANGE):
+            append_unique_fact(relationship_changes, relation_card[FIELD_RELATION_CHANGE], source)
+            append_unique_fact(stable_facts, f"关系变化：{relation_card[FIELD_RELATION_CHANGE]}", source)
+        if state_card.get(FIELD_STATUS_CHANGE):
+            append_unique_fact(stable_facts, state_card[FIELD_STATUS_CHANGE], source)
+        if plot_card.get(FIELD_PLOT_EVENT):
+            chapter_outcomes.append({"chapter": ch_num, "event": plot_card[FIELD_PLOT_EVENT], "source": source})
+            append_unique_fact(resolved_setups, plot_card[FIELD_PLOT_EVENT], source)
+        if emotion_card.get(FIELD_EMOTION_TARGET):
+            append_unique_fact(emotion_arcs, emotion_card[FIELD_EMOTION_TARGET], source, "medium")
+        if carry_card.get(FIELD_CARRY_SETUP):
+            append_unique_fact(open_setups, carry_card[FIELD_CARRY_SETUP], source, "medium")
 
-        if state_card.get("主角当前位置"):
-            append_unique_fact(stable_facts, f"卷内位置锚点：{state_card['主角当前位置']}", source)
-        if state_card.get("主角当前目标"):
-            append_unique_fact(unverified_claims, f"阶段目标：{state_card['主角当前目标']}", source, "medium")
+        if state_card.get(FIELD_STATUS_LOCATION):
+            append_unique_fact(stable_facts, f"卷内位置锚点：{state_card[FIELD_STATUS_LOCATION]}", source)
+        if state_card.get(FIELD_STATUS_GOAL):
+            append_unique_fact(unverified_claims, f"阶段目标：{state_card[FIELD_STATUS_GOAL]}", source, "medium")
 
         if ch_num == chapters[-1][0]:
-            final_state["主角当前位置"] = state_card.get("主角当前位置", "")
-            final_state["主角当前情绪"] = state_card.get("主角当前情绪", "")
-            final_state["主角当前目标"] = state_card.get("主角当前目标", "")
-            final_state["卷末状态变化"] = state_card.get("本章结束后的状态变化", "")
+            final_state["主角当前位置"] = state_card.get(FIELD_STATUS_LOCATION, "")
+            final_state["主角当前情绪"] = state_card.get(FIELD_STATUS_EMOTION, "")
+            final_state["主角当前目标"] = state_card.get(FIELD_STATUS_GOAL, "")
+            final_state["卷末状态变化"] = state_card.get(FIELD_STATUS_CHANGE, "")
 
     next_volume_constraints = [
         make_fact_entry(item, f"vol{vol_num:02d}_ending", "high")

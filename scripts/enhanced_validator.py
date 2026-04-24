@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from card_names import CARRY_CARD, STATUS_CARD
+from card_fields import FIELD_CARRY_MUST, FIELD_STATUS_EMOTION, FIELD_STATUS_LOCATION
 from common_io import extract_body, extract_section, extract_bullets
+from chapter_view import load_chapter_view
 from narrative_context import NarrativeContext
 from state_tracker import StateTracker
 
@@ -25,6 +28,17 @@ class EnhancedValidator:
         self.narrative_context = NarrativeContext(project_dir)
         self.state_tracker = StateTracker(project_dir)
 
+    def _load_content(self, chapter_path: Path) -> str:
+        parent_name = chapter_path.parent.name
+        stem = chapter_path.stem
+        if parent_name.startswith("vol") and stem.startswith("ch") and stem[2:].isdigit():
+            vol_num = int(parent_name.replace("vol", ""))
+            ch_num = int(stem.replace("ch", ""))
+            view = load_chapter_view(self.project_dir, vol_num, ch_num)
+            if view.chapter_path.exists() or view.card_path.exists():
+                return view.merged_text
+        return chapter_path.read_text(encoding="utf-8")
+
     def validate_cross_chapter_consistency(
         self, current_chapter_path: Path, previous_chapter_path: Path
     ) -> list[ValidationIssue]:
@@ -38,8 +52,8 @@ class EnhancedValidator:
         issues = []
 
         try:
-            current_content = current_chapter_path.read_text(encoding="utf-8")
-            previous_content = previous_chapter_path.read_text(encoding="utf-8")
+            current_content = self._load_content(current_chapter_path)
+            previous_content = self._load_content(previous_chapter_path)
         except FileNotFoundError as e:
             issues.append(ValidationIssue(
                 severity="error",
@@ -82,16 +96,16 @@ class EnhancedValidator:
         issues = []
 
         # 从状态卡提取人物信息
-        current_status = extract_section(current_content, "### 1. 状态卡")
-        previous_status = extract_section(previous_content, "### 1. 状态卡")
+        current_status = extract_section(current_content, STATUS_CARD)
+        previous_status = extract_section(previous_content, STATUS_CARD)
 
         current_bullets = extract_bullets(current_status)
         previous_bullets = extract_bullets(previous_status)
 
         # 检查主角状态变化是否合理
-        if "主角当前情绪" in current_bullets and "主角当前情绪" in previous_bullets:
-            current_emotion = current_bullets["主角当前情绪"]
-            previous_emotion = previous_bullets["主角当前情绪"]
+        if FIELD_STATUS_EMOTION in current_bullets and FIELD_STATUS_EMOTION in previous_bullets:
+            current_emotion = current_bullets[FIELD_STATUS_EMOTION]
+            previous_emotion = previous_bullets[FIELD_STATUS_EMOTION]
 
             # 简化检查：情绪不能突变（例如从快乐直接到愤怒）
             emotion_transitions = {
@@ -124,20 +138,20 @@ class EnhancedValidator:
         issues = []
 
         # 从状态卡提取位置信息
-        current_status = extract_section(current_content, "### 1. 状态卡")
-        previous_status = extract_section(previous_content, "### 1. 状态卡")
+        current_status = extract_section(current_content, STATUS_CARD)
+        previous_status = extract_section(previous_content, STATUS_CARD)
 
         current_bullets = extract_bullets(current_status)
         previous_bullets = extract_bullets(previous_status)
 
         # 检查位置变化
-        if "主角当前位置" in current_bullets and "主角当前位置" in previous_bullets:
-            current_location = current_bullets["主角当前位置"]
-            previous_location = previous_bullets["主角当前位置"]
+        if FIELD_STATUS_LOCATION in current_bullets and FIELD_STATUS_LOCATION in previous_bullets:
+            current_location = current_bullets[FIELD_STATUS_LOCATION]
+            previous_location = previous_bullets[FIELD_STATUS_LOCATION]
 
-            # 如果位置发生变化，检查承接卡是否有说明
+            # 如果位置发生变化，检查承上启下卡是否有说明
             if current_location != previous_location:
-                carry_card = extract_section(current_content, "### 6. 承上启下卡")
+                carry_card = extract_section(current_content, CARRY_CARD)
                 carry_bullets = extract_bullets(carry_card)
 
                 if (
@@ -147,8 +161,8 @@ class EnhancedValidator:
                     issues.append(
                         ValidationIssue(
                             severity="info",
-                            message=f"位置从 {previous_location} 变为 {current_location}，但承接卡未说明",
-                            suggestion="建议在承接卡中说明位置变化",
+                            message=f"位置从 {previous_location} 变为 {current_location}，但承上启下卡未说明",
+                            suggestion="建议在承上启下卡中说明位置变化",
                         )
                     )
 
@@ -168,16 +182,16 @@ class EnhancedValidator:
         # 检查是否有时间跳跃
         for keyword in time_keywords:
             if keyword in current_body:
-                # 检查承接卡是否有说明
-                carry_card = extract_section(current_content, "### 6. 承上启下卡")
+                # 检查承上启下卡是否有说明
+                carry_card = extract_section(current_content, CARRY_CARD)
                 carry_bullets = extract_bullets(carry_card)
 
                 if "时间跳跃" not in carry_bullets:
                     issues.append(
                         ValidationIssue(
                             severity="info",
-                            message=f"检测到时间跳跃（{keyword}），建议在承接卡中说明",
-                            suggestion="建议在承接卡中说明时间变化",
+                            message=f"检测到时间跳跃（{keyword}），建议在承上启下卡中说明",
+                            suggestion="建议在承上启下卡中说明时间变化",
                         )
                     )
 
@@ -186,27 +200,27 @@ class EnhancedValidator:
     def check_carry_over_fulfilled(
         self, previous_chapter_path: Path, current_chapter_path: Path
     ) -> list[ValidationIssue]:
-        """检查上一章的承接要求是否被满足
+        """检查上一章的承上启下要求是否被满足
 
-        从上一章的承接卡提取"下章必须接住什么"
+        从上一章的承上启下卡提取"下章必须接住什么"
         检查当前章是否处理了这些要求
         """
         issues = []
 
         try:
-            # 加载上一章的承接卡
-            previous_content = previous_chapter_path.read_text(encoding="utf-8")
-            carry_card = extract_section(previous_content, "### 6. 承上启下卡")
+            # 加载上一章的承上启下卡
+            previous_content = self._load_content(previous_chapter_path)
+            carry_card = extract_section(previous_content, CARRY_CARD)
             carry_bullets = extract_bullets(carry_card)
 
             # 获取必须接住的内容
-            must_handle = carry_bullets.get("下章必须接住什么", "")
+            must_handle = carry_bullets.get(FIELD_CARRY_MUST, "")
 
             if not must_handle:
                 return issues  # 没有明确要求，跳过
 
             # 检查当前章是否处理了这些要求
-            current_content = current_chapter_path.read_text(encoding="utf-8")
+            current_content = self._load_content(current_chapter_path)
             current_body = extract_body(current_content)
 
             # 简化检查：检查关键词是否在当前章中出现
@@ -218,7 +232,7 @@ class EnhancedValidator:
                     ValidationIssue(
                         severity="warning",
                         message=f"上一章要求处理的内容可能未在本章充分体现：{must_handle}",
-                        suggestion="请确保本章处理了上一章承接卡中要求的内容",
+                        suggestion="请确保本章处理了上一章承上启下卡中要求的内容",
                     )
                 )
         except FileNotFoundError as e:
