@@ -605,7 +605,7 @@ def derive_payload(state: SessionState, node: str, derive: dict[str, Any], messa
     state.current_node = node
     save_session(state)
     payload = {
-        "status": "derive_options",
+        "status": "derive",
         "next_action": "derive_with_model",
         "session_id": state.session_id,
         "node": node,
@@ -2114,6 +2114,17 @@ def answer(session_id: str, value: Any) -> dict[str, Any]:
     return error_payload(state, state.current_node, "当前节点不接受用户回答，请先按 orchestrator 指令继续。")
 
 
+DERIVE_NODES = {
+    "PROTAGONIST_DERIVE",
+    "WORLD_DERIVE",
+    "POWER_DERIVE",
+    "FACTIONS_DERIVE",
+    "CHARACTERS_DERIVE",
+    "VOLUME_DERIVE",
+    "NAMING_DERIVE",
+}
+
+
 def resume(session_id: str) -> dict[str, Any]:
     state = load_session(session_id)
     if state.current_node in QUESTION_DEFS:
@@ -2122,6 +2133,76 @@ def resume(session_id: str) -> dict[str, Any]:
         return done_payload(state, "流程已结束。")
     if state.current_node == "POST_SETUP_SUMMARY":
         return ask_node(state, "POST_SETUP_ACTION")
+    if state.current_node in DERIVE_NODES:
+        derive_funcs = {
+            "PROTAGONIST_DERIVE": protagonist_derive_request,
+            "WORLD_DERIVE": world_derive_request,
+            "POWER_DERIVE": power_derive_request,
+            "FACTIONS_DERIVE": factions_derive_request,
+            "CHARACTERS_DERIVE": characters_derive_request,
+            "VOLUME_DERIVE": volume_derive_request,
+            "NAMING_DERIVE": naming_derive_request,
+        }
+        return derive_payload(state, state.current_node, derive_funcs[state.current_node](state), message="请重新提交推导结果。")
+    
+    # 处理正文生成阶段
+    if state.current_node in ("WRITING_ENTRY", "BODY_REQUIRED"):
+        # 读取生成状态
+        import subprocess
+        project_dir = state.selected_project or ""
+        if project_dir:
+            try:
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT_DIR / "continuous_writer.py"),
+                        "run",
+                        project_dir,
+                        "--mode", "auto",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                cw_result = json.loads(result.stdout)
+                status = cw_result.get("status")
+                
+                if status == "body_required":
+                    return {
+                        "status": "generate_body",
+                        "session_id": state.session_id,
+                        "node": "BODY_REQUIRED",
+                        "vol": cw_result.get("vol"),
+                        "ch": cw_result.get("ch"),
+                        "prompt_file": cw_result.get("prompt_file"),
+                        "manifest_file": cw_result.get("manifest_file"),
+                        "message": f"请生成第{cw_result.get('vol')}卷第{cw_result.get('ch')}章正文。",
+                    }
+                elif status == "body_ready":
+                    return {
+                        "status": "generate_cards",
+                        "session_id": state.session_id,
+                        "node": "CARDS_REQUIRED",
+                        "vol": cw_result.get("vol"),
+                        "ch": cw_result.get("ch"),
+                        "body_file": cw_result.get("body_file"),
+                        "message": f"第{cw_result.get('vol')}卷第{cw_result.get('ch')}章正文已就绪，请生成工作卡。",
+                    }
+                elif status == "body_failed":
+                    return {
+                        "status": "body_failed",
+                        "session_id": state.session_id,
+                        "node": "BODY_FAILED",
+                        "vol": cw_result.get("vol"),
+                        "ch": cw_result.get("ch"),
+                        "issues": cw_result.get("issues", []),
+                        "message": f"第{cw_result.get('vol')}卷第{cw_result.get('ch')}章正文生成失败。",
+                    }
+            except (subprocess.CalledProcessError, json.JSONDecodeError):
+                pass
+        
+        return report_payload(state, state.current_node, "当前处于正文生成阶段，请按提示操作。")
+    
     return report_payload(state, state.current_node, "当前节点已进入脚本执行阶段，请按上一条 orchestrator 指令继续。")
 
 
@@ -2225,6 +2306,125 @@ def submit_derived(session_id: str, node: str, value: str) -> dict[str, Any]:
     return ask_node(state, NAMING_FIELD_SPECS[0][1], message="命名候选已生成，请开始锁定书名。")
 
 
+def submit_body(session_id: str, result_file: str) -> dict[str, Any]:
+    """提交正文生成结果"""
+    import subprocess
+    
+    state = load_session(session_id)
+    project_dir = state.selected_project or ""
+    if not project_dir:
+        return error_payload(state, "BODY_SUBMIT", "当前会话缺少已确认项目。")
+    
+    # 调用 continuous_writer.py 消费正文结果
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_DIR / "continuous_writer.py"),
+                "run",
+                project_dir,
+                "--task-result-file", result_file,
+                "--mode", "auto",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        cw_result = json.loads(result.stdout)
+    except subprocess.CalledProcessError as exc:
+        return error_payload(state, "BODY_SUBMIT", f"消费正文结果失败：{exc.stderr}")
+    except json.JSONDecodeError:
+        return error_payload(state, "BODY_SUBMIT", "continuous_writer 返回非法 JSON。")
+    
+    status = cw_result.get("status")
+    
+    if status == "body_ready":
+        # 正文校验通过，返回 generate_cards 状态
+        return {
+            "status": "generate_cards",
+            "session_id": state.session_id,
+            "node": "CARDS_REQUIRED",
+            "vol": cw_result.get("vol"),
+            "ch": cw_result.get("ch"),
+            "body_file": cw_result.get("body_file"),
+            "word_count": cw_result.get("word_count"),
+            "message": f"第{cw_result.get('vol')}卷第{cw_result.get('ch')}章正文生成完成，字数{cw_result.get('word_count')}字。请生成工作卡。",
+        }
+    elif status == "body_failed":
+        # 正文校验失败，返回 body_failed 状态（让 general 智能体决策）
+        return {
+            "status": "body_failed",
+            "session_id": state.session_id,
+            "node": "BODY_FAILED",
+            "vol": cw_result.get("vol"),
+            "ch": cw_result.get("ch"),
+            "body_file": cw_result.get("body_file"),
+            "word_count": cw_result.get("word_count"),
+            "issues": cw_result.get("issues", []),
+            "message": f"第{cw_result.get('vol')}卷第{cw_result.get('ch')}章正文校验失败。",
+        }
+    else:
+        return error_payload(state, "BODY_SUBMIT", f"unexpected status from continuous_writer: {status}")
+
+
+def submit_cards(session_id: str, result_file: str) -> dict[str, Any]:
+    """提交工作卡生成结果"""
+    import subprocess
+    
+    state = load_session(session_id)
+    project_dir = state.selected_project or ""
+    if not project_dir:
+        return error_payload(state, "CARDS_SUBMIT", "当前会话缺少已确认项目。")
+    
+    # 调用 continuous_writer.py 消费工作卡结果
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_DIR / "continuous_writer.py"),
+                "run",
+                project_dir,
+                "--task-result-file", result_file,
+                "--mode", "auto",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        cw_result = json.loads(result.stdout)
+    except subprocess.CalledProcessError as exc:
+        return error_payload(state, "CARDS_SUBMIT", f"消费工作卡结果失败：{exc.stderr}")
+    except json.JSONDecodeError:
+        return error_payload(state, "CARDS_SUBMIT", "continuous_writer 返回非法 JSON。")
+    
+    status = cw_result.get("status")
+    
+    if status == "chapter_ready":
+        # 章节完成
+        return {
+            "status": "report",
+            "session_id": state.session_id,
+            "node": "CHAPTER_COMPLETE",
+            "vol": cw_result.get("vol"),
+            "ch": cw_result.get("ch"),
+            "message": f"第{cw_result.get('vol')}卷第{cw_result.get('ch')}章生成完成。",
+        }
+    elif status == "cards_failed":
+        # 工作卡生成失败（3次重试后）
+        return {
+            "status": "cards_failed",
+            "session_id": state.session_id,
+            "node": "CARDS_FAILED",
+            "vol": cw_result.get("vol"),
+            "ch": cw_result.get("ch"),
+            "issues": cw_result.get("issues", []),
+            "retry_count": cw_result.get("retry_count", 3),
+            "message": f"第{cw_result.get('vol')}卷第{cw_result.get('ch')}章工作卡生成失败（重试3次）。",
+        }
+    else:
+        return error_payload(state, "CARDS_SUBMIT", f"unexpected status from continuous_writer: {status}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="dream 工作流总控脚本")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -2244,6 +2444,16 @@ def parse_args() -> argparse.Namespace:
     submit_parser.add_argument("--value", required=True)
     submit_parser.add_argument("--json", action="store_true")
 
+    submit_body_parser = subparsers.add_parser("submit-body")
+    submit_body_parser.add_argument("--session", required=True)
+    submit_body_parser.add_argument("--result-file", required=True)
+    submit_body_parser.add_argument("--json", action="store_true")
+
+    submit_cards_parser = subparsers.add_parser("submit-cards")
+    submit_cards_parser.add_argument("--session", required=True)
+    submit_cards_parser.add_argument("--result-file", required=True)
+    submit_cards_parser.add_argument("--json", action="store_true")
+
     resume_parser = subparsers.add_parser("resume")
     resume_parser.add_argument("--session", required=True)
     resume_parser.add_argument("--json", action="store_true")
@@ -2259,6 +2469,10 @@ def main() -> int:
             payload = answer(args.session, args.value)
         elif args.command == "submit-derived":
             payload = submit_derived(args.session, args.node, args.value)
+        elif args.command == "submit-body":
+            payload = submit_body(args.session, args.result_file)
+        elif args.command == "submit-cards":
+            payload = submit_cards(args.session, args.result_file)
         else:
             payload = resume(args.session)
     except FileNotFoundError:

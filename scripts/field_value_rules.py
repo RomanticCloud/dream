@@ -61,6 +61,14 @@ RESOURCE_DELTA_FIELDS = [
     FIELD_RESOURCE_LOSS,
 ]
 
+# 继承标记值：子代理可显式标注，校验器会自动从上一章填充实际值
+INHERIT_MARKERS = {"", "继承上章", "无变化", "N/A", "同上", "—", "-"}
+
+
+def is_inherit_marker(value: str) -> bool:
+    """检查值是否为继承标记"""
+    return value.strip() in INHERIT_MARKERS
+
 
 def is_valid_elapsed(value: str) -> bool:
     return bool(ELAPSED_PATTERN.match(value.strip()))
@@ -84,8 +92,16 @@ def parse_suspense_strength(value: str) -> int | None:
     return None
 
 
-def is_required_non_empty(value: str) -> bool:
+def is_required_non_empty(value: str, allow_inherit: bool = False) -> bool:
+    """检查字段值是否非空
+    
+    Args:
+        value: 字段值
+        allow_inherit: 是否允许继承标记（True=继承标记视为已填写）
+    """
     text = value.strip()
+    if allow_inherit and text in INHERIT_MARKERS:
+        return True
     return bool(text and text not in {"无", "暂无", "（待填）", "[更新]"})
 
 

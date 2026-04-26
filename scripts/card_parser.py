@@ -55,6 +55,8 @@ def extract_bullets(section: str) -> dict[str, str]:
 
 
 def filled_bullet_stats(section: str) -> tuple[int, int]:
+    from field_value_rules import INHERIT_MARKERS
+    
     filled = 0
     total = 0
     for line in section.splitlines():
@@ -66,6 +68,28 @@ def filled_bullet_stats(section: str) -> tuple[int, int]:
         if not parts:
             continue
         value = parts[1].strip()
-        if value and value not in {"", "（待填）", "[更新]"}:
+        # 有实际值 或 继承标记 都视为已填写
+        if value and value not in {"", "（待填）", "[更新]"} or value in INHERIT_MARKERS:
             filled += 1
     return filled, total
+
+
+def extract_all_bullets(section: str) -> list[dict[str, str]]:
+    """提取段落中的所有字段-值对（保留空值和继承标记）
+    
+    Returns:
+        [{"field": "主角当前位置", "value": "办公室"}, ...]
+    """
+    bullets = []
+    for line in section.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("-"):
+            continue
+        parts = split_card_line(stripped[1:])
+        if not parts:
+            continue
+        bullets.append({
+            "field": parts[0].strip(),
+            "value": parts[1].strip() if len(parts) > 1 else "",
+        })
+    return bullets

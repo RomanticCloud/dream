@@ -23,10 +23,23 @@ def get_chapters_per_volume(project_dir: Path) -> int:
 
 
 def get_current_progress(project_dir: Path) -> tuple[int, int]:
-    vol_num, ch_num, _ = latest_chapter(project_dir)
-    if vol_num == 0:
-        return 1, 0
-    return vol_num, ch_num
+    """获取当前进度（使用索引缓存）"""
+    try:
+        from chapter_index import get_chapter_index
+        index = get_chapter_index(project_dir)
+        chapters = index.get("chapters", [])
+        
+        if not chapters:
+            return 1, 0
+        
+        last = chapters[-1]
+        return last["vol"], last["ch"]
+    except Exception:
+        # 回退到原有实现
+        vol_num, ch_num, _ = latest_chapter(project_dir)
+        if vol_num == 0:
+            return 1, 0
+        return vol_num, ch_num
 
 
 def is_volume_boundary(project_dir: Path) -> bool:
@@ -35,10 +48,28 @@ def is_volume_boundary(project_dir: Path) -> bool:
 
 
 def get_next_chapter(project_dir: Path) -> tuple[int, int, str]:
-    current_vol, current_ch = get_current_progress(project_dir)
-    chapters_per_volume = get_chapters_per_volume(project_dir)
-    if current_ch == 0:
-        return 1, 1, "vol01"
-    if current_ch >= chapters_per_volume:
-        return current_vol + 1, 1, f"vol{current_vol + 1:02d}"
-    return current_vol, current_ch + 1, f"vol{current_vol:02d}"
+    """获取下一章（使用索引缓存）"""
+    try:
+        from chapter_index import get_chapter_index
+        index = get_chapter_index(project_dir)
+        chapters = index.get("chapters", [])
+        chapters_per_volume = get_chapters_per_volume(project_dir)
+        
+        if not chapters:
+            return 1, 1, "vol01"
+        
+        last = chapters[-1]
+        current_vol, current_ch = last["vol"], last["ch"]
+        
+        if current_ch >= chapters_per_volume:
+            return current_vol + 1, 1, f"vol{current_vol + 1:02d}"
+        return current_vol, current_ch + 1, f"vol{current_vol:02d}"
+    except Exception:
+        # 回退到原有实现
+        current_vol, current_ch = get_current_progress(project_dir)
+        chapters_per_volume = get_chapters_per_volume(project_dir)
+        if current_ch == 0:
+            return 1, 1, "vol01"
+        if current_ch >= chapters_per_volume:
+            return current_vol + 1, 1, f"vol{current_vol + 1:02d}"
+        return current_vol, current_ch + 1, f"vol{current_vol:02d}"

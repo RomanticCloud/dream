@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from pathlib import Path
@@ -71,7 +72,33 @@ class SubagentChapterGenerator:
     def __init__(self, project_dir: Path):
         self.project_dir = project_dir
         self.chapters_dir = project_dir / "chapters"
+        # 实例级缓存（单章生成生命周期内有效）
+        self._chapter_index_cache = None      # iter_chapter_files 结果缓存
+        self._chapter_view_cache = {}          # (vol, ch) -> ChapterView 缓存
+        self._manifest_cache = {}              # (vol, ch) -> manifest dict 缓存
 
+    def _get_chapter_index(self):
+        """获取章节索引（带实例缓存）"""
+        if self._chapter_index_cache is None:
+            self._chapter_index_cache = list(iter_chapter_files(self.project_dir))
+        return self._chapter_index_cache
+    
+    def _get_chapter_view(self, vol, ch):
+        """获取章节视图（带实例缓存）"""
+        key = (vol, ch)
+        if key not in self._chapter_view_cache:
+            self._chapter_view_cache[key] = load_chapter_view(self.project_dir, vol, ch)
+        return self._chapter_view_cache[key]
+    
+    def _get_manifest(self, vol, ch):
+        """获取manifest（带实例缓存）"""
+        key = (vol, ch)
+        if key not in self._manifest_cache:
+            manifest_path = self._manifest_path(vol, ch)
+            if manifest_path.exists():
+                self._manifest_cache[key] = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return self._manifest_cache.get(key)
+    
     def _require_runtime_state(self) -> dict:
         state = load_project_state(self.project_dir)
         require_locked_protagonist_gender(state)
@@ -107,14 +134,17 @@ class SubagentChapterGenerator:
         if not self.chapters_dir.exists():
             return chapters
 
-        for vol, ch, ch_file in iter_chapter_files(self.project_dir):
+        # 使用缓存的章节索引
+        chapter_index = self._get_chapter_index()
+        for vol, ch, ch_file in chapter_index:
             if vol > vol_num:
                 continue
 
             if vol == vol_num and ch >= ch_num:
                 continue
 
-            content = load_chapter_view(self.project_dir, vol, ch).merged_text
+            # 使用缓存的章节视图
+            content = self._get_chapter_view(vol, ch).merged_text
 
             title_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
             title = title_match.group(1) if title_match else f"第{ch}章"
@@ -130,6 +160,14 @@ class SubagentChapterGenerator:
             chapters = chapters[-lookback:]
 
         return chapters
+
+    def _get_last_chapter_num(self, vol_num: int) -> int | None:
+        """获取指定卷的最后一章号"""
+        vol_dir = self.project_dir / "chapters" / f"vol{vol_num:02d}"
+        if not vol_dir.exists():
+            return None
+        chapters = [int(f.stem.replace("ch", "")) for f in vol_dir.glob("ch*.md") if f.stem.replace("ch", "").isdigit()]
+        return max(chapters) if chapters else None
 
     def _manifest_path(self, vol_num: int, ch_num: int) -> Path:
         return self.project_dir / "context" / f"subagent_context_vol{vol_num:02d}_ch{ch_num:02d}.json"
@@ -188,6 +226,87 @@ class SubagentChapterGenerator:
         draft_target = (min_words + max_words) // 2
         pass_threshold = int(min_words * 0.85)
 
+        manifest_id = f"subagent-read-all-v1-vol{vol_num:02d}-ch{ch_num:02d}"
+        manifest_path = self._manifest_path(vol_num, ch_num)
+
+        # 尝试增量构建：复用前一章的 manifest
+        prev_manifest = self._get_manifest(vol_num, ch_num - 1) if ch_num > 1 else None
+        if prev_manifest:
+            # 增量构建：在前一章 manifest 基础上追加
+            prev_chapters = prev_manifest.get("previous_chapters", [])
+            prev_required_paths = prev_manifest.get("required_read_sequence", [])
+            prev_seen_paths = set(prev_required_paths)
+            
+            # 获取前一章的信息
+            prev_vol_num = vol_num
+            prev_ch_num = ch_num - 1
+            if prev_ch_num < 1:
+                prev_vol_num = vol_num - 1
+                prev_ch_num = self._get_last_chapter_num(prev_vol_num) or 0
+            
+            if prev_ch_num > 0:
+                view = self._get_chapter_view(prev_vol_num, prev_ch_num)
+                title = self._title_from_text(view.raw_body_file or view.merged_text, f"第{prev_ch_num}章")
+                body_path = view.chapter_path.resolve()
+                body_path_str = str(body_path)
+                
+                card_path: str | None = None
+                card_source = "missing"
+                if view.has_separate_card:
+                    card_path = str(view.card_path.resolve())
+                    card_source = "separate_file"
+                elif view.has_inline_card:
+                    card_path = str(view.chapter_path.resolve())
+                    card_source = "inline_in_body_file"
+                
+                # 追加前一章的信息
+                new_prev_chapters = list(prev_chapters) + [{
+                    "vol": prev_vol_num,
+                    "ch": prev_ch_num,
+                    "title": title,
+                    "body_path": body_path_str,
+                    "card_path": card_path,
+                    "card_source": card_source,
+                }]
+                
+                # 追加前一章的文件路径
+                new_required_paths = list(prev_required_paths)
+                if body_path_str not in prev_seen_paths:
+                    new_required_paths.append(body_path_str)
+                if card_path and card_path not in prev_seen_paths:
+                    new_required_paths.append(card_path)
+                
+                manifest = {
+                    **prev_manifest,
+                    "context_manifest_id": manifest_id,
+                    "current_chapter": {
+                        "vol": vol_num,
+                        "ch": ch_num,
+                    },
+                    "output_targets": {
+                        "chapter_body_file": str(chapter_file(self.project_dir, vol_num, ch_num).resolve()),
+                        "chapter_cards_file": str(chapter_card_file(self.project_dir, vol_num, ch_num).resolve()),
+                    },
+                    "task_context": {
+                        **prev_manifest.get("task_context", {}),
+                        "chapter_plan": chapter_plan.get("description") if chapter_plan else None,
+                        "revision_status": revision_status,
+                        "revision_tasks": revision_tasks or [],
+                    },
+                    "previous_chapters": new_prev_chapters,
+                    "required_read_sequence": new_required_paths,
+                    "counts": {
+                        "previous_chapters": len(new_prev_chapters),
+                        "required_files": len(new_required_paths),
+                    },
+                }
+                save_json_file(manifest_path, manifest)
+                manifest["manifest_file"] = str(manifest_path)
+                # 更新缓存
+                self._manifest_cache[(vol_num, ch_num)] = manifest
+                return manifest
+
+        # 完整构建（回退到原有逻辑）
         static_groups = self._collect_static_context_files(vol_num)
         previous_chapters: list[dict] = []
         missing_cards: list[str] = []
@@ -204,13 +323,16 @@ class SubagentChapterGenerator:
             for path in paths:
                 add_required(path)
 
-        for prev_vol, prev_ch, _ in iter_chapter_files(self.project_dir):
+        # 使用缓存的章节索引，避免重复遍历目录
+        chapter_index = self._get_chapter_index()
+        for prev_vol, prev_ch, _ in chapter_index:
             if prev_vol > vol_num:
                 continue
             if prev_vol == vol_num and prev_ch >= ch_num:
                 continue
 
-            view = load_chapter_view(self.project_dir, prev_vol, prev_ch)
+            # 使用缓存的章节视图，避免重复读取文件
+            view = self._get_chapter_view(prev_vol, prev_ch)
             title = self._title_from_text(view.raw_body_file or view.merged_text, f"第{prev_ch}章")
             body_path = view.chapter_path.resolve()
             add_required(body_path)
@@ -674,7 +796,8 @@ class SubagentChapterGenerator:
         latest = previous_chapters[-1]
         text = latest.get("content")
         if not text and latest.get("vol") and latest.get("ch"):
-            text = load_chapter_view(self.project_dir, latest["vol"], latest["ch"]).merged_text
+            # 使用缓存的章节视图
+            text = self._get_chapter_view(latest["vol"], latest["ch"]).merged_text
         if not text:
             return {}
         return self._latest_continuation_requirements_from_text(text)
@@ -689,7 +812,8 @@ class SubagentChapterGenerator:
     def _recent_mainline_summary_from_manifest(self, manifest: dict, limit: int = 3) -> list[str]:
         items: list[str] = []
         for chapter in manifest.get("previous_chapters", [])[-limit:]:
-            text = load_chapter_view(self.project_dir, chapter["vol"], chapter["ch"]).merged_text
+            # 使用缓存的章节视图，避免重复读取文件
+            text = self._get_chapter_view(chapter["vol"], chapter["ch"]).merged_text
             summary = self._chapter_event_summary_from_text(text)
             items.append(f"- 第{chapter['vol']}卷第{chapter['ch']}章《{chapter['title']}》：{summary}")
         return items
@@ -1070,7 +1194,8 @@ class SubagentChapterGenerator:
                 "separated": True/False
             }
         """
-        view = load_chapter_view(self.project_dir, vol_num, ch_num)
+        # 使用缓存的章节视图
+        view = self._get_chapter_view(vol_num, ch_num)
 
         result = {
             "content_exists": view.chapter_path.exists(),

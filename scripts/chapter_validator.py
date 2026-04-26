@@ -45,11 +45,13 @@ from card_fields import (
 )
 from field_value_rules import (
     ERROR_REQUIRED_FIELDS,
+    INHERIT_MARKERS,
     POWER_ERROR_REQUIRED_FIELDS,
     POWER_WARNING_REQUIRED_FIELDS,
     RESOURCE_DELTA_FIELDS,
     WARNING_REQUIRED_FIELDS,
     has_resource_delta,
+    is_inherit_marker,
     is_required_non_empty,
     is_valid_elapsed,
     is_valid_power_loss_ratio,
@@ -156,10 +158,8 @@ def validate_resource_format(content: str, state: dict) -> list[ValidationIssue]
     return issues
 
 
-def validate_word_count(content: str, min_words: int, max_words: int, threshold_factor: float = 0.85) -> tuple[int, list[ValidationIssue]]:
-    """验证字数
-    threshold_factor: 通过阈值因子，默认85%（即 min_words * 0.85）
-    """
+def validate_word_count(content: str, min_words: int, max_words: int) -> tuple[int, list[ValidationIssue]]:
+    """验证字数：字数必须在 min_words ~ max_words 范围内"""
     issues = []
 
     if BODY_MARKER not in content:
@@ -167,17 +167,10 @@ def validate_word_count(content: str, min_words: int, max_words: int, threshold_
 
     body = extract_body(content)
     word_count = count_words(body)
-    
-    # 质量门阈值
-    pass_threshold = int(min_words * threshold_factor)
 
-    # 严格判断：低于pass_threshold直接失败（Reject）
-    if word_count < pass_threshold:
-        issues.append(ValidationIssue("error", f"正文字数 {word_count} 字，低于质量门槛 {pass_threshold} 字（{threshold_factor*100:.0f}%阈值），需要重新生成"))
-    # 低于最小值但高于阈值，给警告（仍通过）
-    elif word_count < min_words:
-        issues.append(ValidationIssue("warning", f"正文字数 {word_count} 字，低于目标 {min_words} 字但可通过"))
-    # 超过最大字，给警告
+    # 范围判断：字数必须在 min_words ~ max_words 范围内
+    if word_count < min_words:
+        issues.append(ValidationIssue("error", f"正文字数 {word_count} 字，低于最小值 {min_words} 字，需要重新生成"))
     elif word_count > max_words:
         issues.append(ValidationIssue("warning", f"正文字数 {word_count} 字，超过最大值 {max_words}"))
 
@@ -241,19 +234,19 @@ def validate_cards(content: str, state: dict) -> tuple[dict, list[ValidationIssu
             issues.append(ValidationIssue("error", f"{header} 缺少标准字段: {', '.join(missing_fields)}"))
 
         for field in ERROR_REQUIRED_FIELDS:
-            if field in bullet_map and not is_required_non_empty(bullet_map[field]):
+            if field in bullet_map and not is_required_non_empty(bullet_map[field], allow_inherit=True):
                 issues.append(ValidationIssue("error", f"{header} 字段“{field}”不能为空"))
 
         for field in WARNING_REQUIRED_FIELDS:
-            if field in bullet_map and not is_required_non_empty(bullet_map[field]):
+            if field in bullet_map and not is_required_non_empty(bullet_map[field], allow_inherit=True):
                 issues.append(ValidationIssue("warning", f"{header} 字段“{field}”建议填写"))
 
         if header == "### 2. 战力卡":
             for field in POWER_ERROR_REQUIRED_FIELDS:
-                if field in bullet_map and not is_required_non_empty(bullet_map[field]):
+                if field in bullet_map and not is_required_non_empty(bullet_map[field], allow_inherit=True):
                     issues.append(ValidationIssue("error", f"{header} 字段“{field}”不能为空"))
             for field in POWER_WARNING_REQUIRED_FIELDS:
-                if field in bullet_map and not is_required_non_empty(bullet_map[field]):
+                if field in bullet_map and not is_required_non_empty(bullet_map[field], allow_inherit=True):
                     issues.append(ValidationIssue("warning", f"{header} 字段“{field}”建议填写"))
 
             if FIELD_POWER_CROSS in bullet_map and bullet_map[FIELD_POWER_CROSS] and not is_yes_no(bullet_map[FIELD_POWER_CROSS]):
@@ -282,7 +275,7 @@ def validate_cards(content: str, state: dict) -> tuple[dict, list[ValidationIssu
                 issues.append(ValidationIssue("error", f"{header} 字段“{FIELD_EMOTION_SUSPENSE}”必须为1-10的整数"))
 
         for field in RESOURCE_DELTA_FIELDS:
-            if field in bullet_map and is_required_non_empty(bullet_map[field]) and not has_resource_delta(bullet_map[field]):
+            if field in bullet_map and is_required_non_empty(bullet_map[field], allow_inherit=True) and not has_resource_delta(bullet_map[field]):
                 issues.append(ValidationIssue("warning", f"{header} 字段“{field}”建议使用 +/-数字+资源名 格式"))
 
     for header in required_headers:
@@ -330,11 +323,25 @@ def validate_chapter(
     project_dir: Path,
     vol_num: int | None = None,
     ch_num: int | None = None,
-    threshold_factor: float = 0.85
 ) -> ValidationResult:
-    """验证章节
-    threshold_factor: 通过阈值因子，默认85%
-    """
+    """验证章节：字数必须在 min_words ~ max_words 范围内"""
+    
+    # 确定卷章号
+    if vol_num is None or ch_num is None:
+        vol_num, ch_num, _ = latest_chapter(project_dir)
+    
+    # 检查缓存（已通过的校验结果可直接复用）
+    try:
+        from validation_cache import get_cached_validation
+        cached = get_cached_validation(project_dir, vol_num, ch_num)
+        if cached:
+            return ValidationResult(
+                passed=cached["passed"],
+                issues=[ValidationIssue(i["type"], i["message"]) for i in cached["issues"]],
+                word_count=cached.get("word_count", 0),
+            )
+    except Exception:
+        pass  # 缓存读取失败不影响主流程
 
     state = load_project_state(project_dir)
     try:
@@ -376,7 +383,7 @@ def validate_chapter(
     format_issues = validate_format(content)
     all_issues.extend(format_issues)
 
-    word_count, word_issues = validate_word_count(content, min_words, max_words, threshold_factor)
+    word_count, word_issues = validate_word_count(content, min_words, max_words)
     all_issues.extend(word_issues)
 
     card_status, card_issues = validate_cards(content, state)
@@ -447,7 +454,7 @@ def validate_chapter(
         else:
             clear_chapter_revision(project_dir, vol_num, ch_num)
 
-    return ValidationResult(
+    result = ValidationResult(
         passed=not has_errors,
         issues=all_issues,
         word_count=word_count,
@@ -456,13 +463,21 @@ def validate_chapter(
         fix_plan=fix_plan,
         revision_tasks=revision_tasks,
     )
+    
+    # 保存校验缓存（仅保存通过的校验结果）
+    try:
+        from validation_cache import save_validation_cache
+        save_validation_cache(project_dir, vol_num, ch_num, result)
+    except Exception:
+        pass  # 缓存保存失败不影响主流程
+
+    return result
 
 
 def fix_time_logic_and_revalidate(
     project_dir: Path,
     vol_num: int,
     ch_num: int,
-    threshold_factor: float = 0.85
 ) -> tuple[bool, list[TimeLogicIssue]]:
     """自动修复时间逻辑问题并重新验证
 
@@ -518,7 +533,6 @@ def main():
     parser.add_argument("project_dir", nargs="?", default=".", help="项目目录")
     parser.add_argument("vol", nargs="?", type=int, help="卷号")
     parser.add_argument("ch", nargs="?", type=int, help="章节号")
-    parser.add_argument("--threshold", "-t", type=float, default=0.85, help="通过阈值因子（默认0.85）")
     parser.add_argument("--json", "-j", action="store_true", help="JSON格式输出")
     parser.add_argument("--auto-revision", "-r", action="store_true", help="自动处理回改")
     args = parser.parse_args()
@@ -528,7 +542,7 @@ def main():
         print(f"项目目录不存在: {project_dir}")
         sys.exit(1)
 
-    result = validate_chapter(project_dir, args.vol, args.ch, args.threshold)
+    result = validate_chapter(project_dir, args.vol, args.ch)
 
     if args.json:
         import json

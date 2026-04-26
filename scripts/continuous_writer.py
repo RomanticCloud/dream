@@ -7,8 +7,16 @@ import json
 import sys
 from pathlib import Path
 
+from body_dispatcher import BodyDispatcher
 from chapter_validator import validate_chapter
 from common_io import ProjectStateError, load_project_state, require_chapter_word_range, require_locked_protagonist_gender
+from generation_state import (
+    cleanup_generation_state,
+    get_generation_phase,
+    load_generation_state,
+    save_generation_state,
+    update_generation_state,
+)
 from path_rules import chapter_card_file, chapter_file, volume_memory_md
 from progress_rules import get_chapters_per_volume, get_current_progress, get_next_chapter, is_volume_boundary
 from revision_state import get_pending_chapter_revision, get_volume_revision
@@ -27,7 +35,15 @@ def _emit(status: str, **extra) -> dict:
     return payload
 
 
-def run(project_dir: Path, task_result_file: str | None = None) -> dict:
+def run(project_dir: Path, task_result_file: str | None = None, mode: str | None = None) -> dict:
+    """运行连续写作调度器
+    
+    Args:
+        project_dir: 项目目录
+        task_result_file: 子代理返回的结果文件路径
+        mode: 运行模式（None=自动检测, body-only=只生成正文, card-only=只生成工作卡）
+    """
+    # 一次性加载所有状态信息（避免重复 I/O）
     state = load_project_state(project_dir)
     if not state:
         return _emit("missing_state", message="未找到项目状态文件")
@@ -38,67 +54,271 @@ def run(project_dir: Path, task_result_file: str | None = None) -> dict:
     except ProjectStateError as exc:
         return _emit("missing_state", message=f"项目配置不完整：{exc}")
 
+    # 缓存 generation_state（避免多次读取同一文件）
+    gen_state = load_generation_state(project_dir) or {}
+    gen_phase = gen_state.get("phase")
+    
+    # 缓存进度信息（避免重复计算）
+    current_vol, current_ch = get_current_progress(project_dir)
+    next_vol, next_ch, _ = get_next_chapter(project_dir)
+    chapters_per_volume = get_chapters_per_volume(project_dir)
+
+    # 检查是否有待处理回改
     pending = get_pending_chapter_revision(project_dir)
     if pending:
         chapter_key, payload = pending
         return _emit("gate_failed", revision_key=chapter_key, revision_status=payload.get("status"))
 
-    current_vol, current_ch = get_current_progress(project_dir)
-
-    if task_result_file:
-        next_vol, next_ch, _ = get_next_chapter(project_dir)
-        dispatcher = TaskChapterDispatcher(project_dir)
-        try:
-            raw_result = Path(task_result_file).expanduser().resolve().read_text(encoding="utf-8")
-            consumed = dispatcher.consume_task_result(next_vol, next_ch, raw_result, validate=True)
-        except FileNotFoundError:
-            return _emit("gate_failed", error=f"Task 结果文件不存在: {task_result_file}")
-        except TaskResultError as exc:
-            return _emit("gate_failed", error=str(exc))
+    # 如果指定了模式，优先使用指定模式
+    if mode == "body-only":
+        return _generate_body_phase(project_dir, next_vol, next_ch)
+    elif mode == "card-only":
+        vol = gen_state.get("current_vol", 1)
+        ch = gen_state.get("current_ch", 1)
+        return _generate_card_phase(project_dir, vol, ch)
+    
+    # 自动检测模式：根据 generation_state 决定下一步
+    if gen_phase == "body_required":
+        # 需要生成正文
+        vol = gen_state.get("current_vol", 1)
+        ch = gen_state.get("current_ch", 1)
         return _emit(
-            consumed.status,
-            vol=consumed.vol,
-            ch=consumed.ch,
-            body_output=consumed.body_output,
-            card_output=consumed.card_output,
-            issues=consumed.issues,
+            "body_required",
+            vol=vol,
+            ch=ch,
+            prompt_file=gen_state.get("body_prompt_file", ""),
+            manifest_file=gen_state.get("manifest_file", ""),
         )
+    elif gen_phase == "body_ready":
+        # 正文已就绪，进入工作卡生成阶段
+        vol = gen_state.get("current_vol", 1)
+        ch = gen_state.get("current_ch", 1)
+        return _generate_card_phase(project_dir, vol, ch)
+    elif gen_phase == "cards_required":
+        # 需要生成工作卡
+        vol = gen_state.get("current_vol", 1)
+        ch = gen_state.get("current_ch", 1)
+        return _emit(
+            "cards_required",
+            vol=vol,
+            ch=ch,
+            prompt_file=gen_state.get("card_prompt_file", ""),
+            body_file=gen_state.get("body_file", ""),
+        )
+    
+    # 处理 task_result_file（消费子代理返回的结果）
+    if task_result_file:
+        
+        # 根据当前阶段决定消费方式
+        if gen_phase in ("body_required", None):
+            # 消费正文结果
+            return _consume_body_result(project_dir, task_result_file, next_vol, next_ch)
+        elif gen_phase in ("cards_required", "body_ready"):
+            # 消费工作卡结果
+            return _consume_cards_result(project_dir, task_result_file, next_vol, next_ch)
+        else:
+            # 默认使用旧的合并消费方式（向后兼容）
+            dispatcher = TaskChapterDispatcher(project_dir)
+            try:
+                raw_result = Path(task_result_file).expanduser().resolve().read_text(encoding="utf-8")
+                consumed = dispatcher.consume_task_result(next_vol, next_ch, raw_result, validate=True)
+            except FileNotFoundError:
+                return _emit("gate_failed", error=f"Task 结果文件不存在: {task_result_file}")
+            except TaskResultError as exc:
+                return _emit("gate_failed", error=str(exc))
+            return _emit(
+                consumed.status,
+                vol=consumed.vol,
+                ch=consumed.ch,
+                body_output=consumed.body_output,
+                card_output=consumed.card_output,
+                issues=consumed.issues,
+            )
+    
+    # 现有逻辑（检查已完成章节、卷边界等）
+    # 使用已缓存的 current_vol, current_ch, next_vol, next_ch
+    
     if current_ch > 0 and _chapter_ready(project_dir, current_vol, current_ch):
         validation = validate_chapter(project_dir, current_vol, current_ch)
         if not validation.passed:
             return _emit("gate_failed", vol=current_vol, ch=current_ch, issues=[issue.message for issue in validation.issues])
 
-    if current_ch > 0 and is_volume_boundary(project_dir):
+    # 使用缓存的 chapters_per_volume 检查卷边界，避免重复计算
+    if current_ch > 0 and current_ch >= chapters_per_volume:
         volume_revision = get_volume_revision(project_dir, current_vol)
         if volume_revision and volume_revision.get("status") in {"pending_regenerate", "pending_rewrite_card", "pending_polish"}:
             return _emit("volume_ready", vol=current_vol, revision_status=volume_revision.get("status"))
         if volume_memory_md(project_dir, current_vol).exists():
-            next_vol, next_ch, _ = get_next_chapter(project_dir)
             return _emit("draft_required", vol=next_vol, ch=next_ch, reason="next_volume")
         return _emit("batch_ready", vol=current_vol, ch=current_ch, reason="volume_boundary")
 
-    next_vol, next_ch, _ = get_next_chapter(project_dir)
     if _chapter_ready(project_dir, next_vol, next_ch):
         validation = validate_chapter(project_dir, next_vol, next_ch)
         if validation.passed:
             return _emit("chapter_ready", vol=next_vol, ch=next_ch)
         return _emit("gate_failed", vol=next_vol, ch=next_ch, issues=[issue.message for issue in validation.issues])
 
-    dispatcher = TaskChapterDispatcher(project_dir)
-    result = dispatcher.dispatch(next_vol, next_ch)
-    if isinstance(result, dict):
-        return _emit("draft_required", vol=next_vol, ch=next_ch, error=result.get("error", "生成请求失败"))
+    # 默认：进入正文生成阶段（新的分离式流程）
+    return _generate_body_phase(project_dir, next_vol, next_ch)
+
+
+def _generate_body_phase(project_dir: Path, vol_num: int, ch_num: int) -> dict:
+    """Phase A: 生成正文"""
+    dispatcher = BodyDispatcher(project_dir)
+    result = dispatcher.dispatch(vol_num, ch_num)
+    
+    if result.status == "error":
+        return _emit("body_failed", vol=vol_num, ch=ch_num, error="生成正文prompt失败")
+    
+    # 保存生成状态
+    save_generation_state(project_dir, {
+        "phase": "body_required",
+        "current_vol": vol_num,
+        "current_ch": ch_num,
+        "body_prompt_file": result.prompt_file,
+        "manifest_file": result.manifest_file,
+        "context_manifest_id": result.context_manifest_id,
+    })
+    
     return _emit(
-        "draft_required",
-        vol=next_vol,
-        ch=next_ch,
+        "body_required",
+        vol=vol_num,
+        ch=ch_num,
         prompt_file=result.prompt_file,
         request_file=result.request_file,
         manifest_file=result.manifest_file,
         context_manifest_id=result.context_manifest_id,
         body_output=result.body_output,
-        card_output=result.card_output,
     )
+
+
+def _consume_body_result(project_dir: Path, result_file: str, vol_num: int, ch_num: int) -> dict:
+    """消费正文生成结果"""
+    dispatcher = BodyDispatcher(project_dir)
+    
+    try:
+        raw_result = Path(result_file).expanduser().resolve().read_text(encoding="utf-8")
+        consumed = dispatcher.consume(vol_num, ch_num, raw_result, validate=True)
+    except FileNotFoundError:
+        return _emit("body_failed", vol=vol_num, ch=ch_num, error=f"结果文件不存在: {result_file}")
+    except Exception as exc:
+        return _emit("body_failed", vol=vol_num, ch=ch_num, error=str(exc))
+    
+    if consumed.status == "body_ready":
+        # 正文校验通过，进入工作卡生成阶段
+        update_generation_state(project_dir, {
+            "phase": "body_ready",
+            "body_file": consumed.body_file,
+            "word_count": consumed.word_count,
+        })
+        
+        return _emit(
+            "body_ready",
+            vol=consumed.vol,
+            ch=consumed.ch,
+            body_file=consumed.body_file,
+            word_count=consumed.word_count,
+        )
+    else:
+        # 正文校验失败
+        return _emit(
+            "body_failed",
+            vol=consumed.vol,
+            ch=consumed.ch,
+            body_file=consumed.body_file,
+            word_count=consumed.word_count,
+            issues=consumed.issues,
+        )
+
+
+def _generate_card_phase(project_dir: Path, vol_num: int, ch_num: int) -> dict:
+    """Phase B: 生成工作卡"""
+    from card_dispatcher import CardDispatcher
+    
+    dispatcher = CardDispatcher(project_dir)
+    
+    # 检查是否有前一次失败的错误信息
+    gen_state = load_generation_state(project_dir)
+    last_errors = gen_state.get("last_error", [])
+    retry_count = gen_state.get("card_retry_count", 0)
+    
+    result = dispatcher.dispatch(vol_num, ch_num, last_errors=last_errors, retry_count=retry_count)
+    
+    if result.status == "error":
+        return _emit("cards_failed", vol=vol_num, ch=ch_num, error="生成工作卡prompt失败")
+    
+    # 保存生成状态
+    update_generation_state(project_dir, {
+        "phase": "cards_required",
+        "card_prompt_file": result.prompt_file,
+    })
+    
+    return _emit(
+        "cards_required",
+        vol=vol_num,
+        ch=ch_num,
+        prompt_file=result.prompt_file,
+        request_file=result.request_file,
+        body_file=result.body_file,
+        retry_count=retry_count,
+    )
+
+
+def _consume_cards_result(project_dir: Path, result_file: str, vol_num: int, ch_num: int) -> dict:
+    """消费工作卡生成结果"""
+    from card_dispatcher import CardDispatcher
+    
+    dispatcher = CardDispatcher(project_dir)
+    
+    try:
+        raw_result = Path(result_file).expanduser().resolve().read_text(encoding="utf-8")
+        consumed = dispatcher.consume(vol_num, ch_num, raw_result, validate=True)
+    except FileNotFoundError:
+        return _emit("cards_failed", vol=vol_num, ch=ch_num, error=f"结果文件不存在: {result_file}")
+    except Exception as exc:
+        return _emit("cards_failed", vol=vol_num, ch=ch_num, error=str(exc))
+    
+    if consumed.status == "chapter_ready":
+        # 章节完成，清理状态
+        cleanup_generation_state(project_dir)
+        
+        # 更新章节索引（新章节已生成）
+        try:
+            from chapter_index import update_chapter_index
+            update_chapter_index(project_dir)
+        except Exception:
+            pass  # 索引更新失败不影响主流程
+        
+        return _emit(
+            "chapter_ready",
+            vol=consumed.vol,
+            ch=consumed.ch,
+            chapter_file=consumed.chapter_file,
+            card_file=consumed.card_file,
+        )
+    else:
+        # 工作卡校验失败
+        retry_count = load_generation_state(project_dir).get("card_retry_count", 0)
+        retry_count += 1
+        
+        if retry_count <= 3:
+            # 自动重试
+            update_generation_state(project_dir, {
+                "card_retry_count": retry_count,
+                "last_error": consumed.issues,
+            })
+            
+            # 重新生成工作卡prompt（包含错误信息）
+            return _generate_card_phase(project_dir, vol_num, ch_num)
+        else:
+            # 3次都失败
+            return _emit(
+                "cards_failed",
+                vol=consumed.vol,
+                ch=consumed.ch,
+                issues=consumed.issues,
+                retry_count=retry_count,
+            )
 
 
 def resume(project_dir: Path) -> dict:
@@ -112,15 +332,17 @@ def main() -> int:
     parser.add_argument("mode", choices=["run", "resume"])
     parser.add_argument("project_dir")
     parser.add_argument("--task-result-file")
+    parser.add_argument("--mode", dest="run_mode", choices=["body-only", "card-only", "auto"], default="auto",
+                       help="运行模式：body-only=只生成正文, card-only=只生成工作卡, auto=自动检测")
     args = parser.parse_args()
 
     project_dir = Path(args.project_dir).expanduser().resolve()
     if args.mode == "run":
-        result = run(project_dir, args.task_result_file)
+        result = run(project_dir, args.task_result_file, mode=args.run_mode)
     else:
         result = resume(project_dir)
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0 if result["status"] not in {"missing_state", "gate_failed"} else 1
+    return 0 if result["status"] not in {"missing_state", "gate_failed", "body_failed"} else 1
 
 
 if __name__ == "__main__":
