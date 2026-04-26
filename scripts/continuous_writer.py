@@ -36,11 +36,16 @@ def _emit(status: str, **extra) -> dict:
 
 
 def run(project_dir: Path, task_result_file: str | None = None, mode: str | None = None) -> dict:
-    """运行连续写作调度器
+    """运行连续写作调度器（子代理模式）
+    
+    新架构：
+    1. 子代理直接写入文件（body/cards）
+    2. 主会话只负责路由和状态检测
+    3. body完成后自动进入cards，cards完成后返回chapter_ready
     
     Args:
         project_dir: 项目目录
-        task_result_file: 子代理返回的结果文件路径
+        task_result_file: 子代理返回的结果文件路径（已弃用，保留兼容）
         mode: 运行模式（None=自动检测, body-only=只生成正文, card-only=只生成工作卡）
     """
     # 一次性加载所有状态信息（避免重复 I/O）
@@ -77,63 +82,91 @@ def run(project_dir: Path, task_result_file: str | None = None, mode: str | None
         ch = gen_state.get("current_ch", 1)
         return _generate_card_phase(project_dir, vol, ch)
     
-    # 自动检测模式：根据 generation_state 决定下一步
+    # 自动检测模式：根据 generation_state 和文件存在性决定下一步
     if gen_phase == "body_required":
-        # 需要生成正文
         vol = gen_state.get("current_vol", 1)
         ch = gen_state.get("current_ch", 1)
+        
+        # 检查正文文件是否已由子代理写入
+        body_file = chapter_file(project_dir, vol, ch)
+        if body_file.exists():
+            # 验证正文
+            from body_validator import validate_body
+            body_text = body_file.read_text(encoding="utf-8")
+            validation = validate_body(body_text, project_dir, vol, ch)
+            
+            if validation.passed:
+                # 正文有效，自动进入 body_ready → cards_required
+                update_generation_state(project_dir, {
+                    "phase": "body_ready",
+                    "body_file": str(body_file),
+                    "word_count": validation.word_count,
+                })
+                return _generate_card_phase(project_dir, vol, ch)
+            else:
+                # 正文验证失败，返回错误
+                return _emit(
+                    "body_failed",
+                    vol=vol, ch=ch,
+                    body_file=str(body_file),
+                    issues=[issue.message for issue in validation.issues],
+                )
+        
+        # 正文不存在，返回 body_required（等待子代理生成）
         return _emit(
             "body_required",
-            vol=vol,
-            ch=ch,
+            vol=vol, ch=ch,
             prompt_file=gen_state.get("body_prompt_file", ""),
             manifest_file=gen_state.get("manifest_file", ""),
         )
+    
     elif gen_phase == "body_ready":
         # 正文已就绪，进入工作卡生成阶段
         vol = gen_state.get("current_vol", 1)
         ch = gen_state.get("current_ch", 1)
         return _generate_card_phase(project_dir, vol, ch)
+    
     elif gen_phase == "cards_required":
-        # 需要生成工作卡
         vol = gen_state.get("current_vol", 1)
         ch = gen_state.get("current_ch", 1)
+        
+        # 检查工作卡文件是否已由子代理写入
+        card_file = chapter_card_file(project_dir, vol, ch)
+        if card_file.exists():
+            # 验证完整章节
+            validation = validate_chapter(project_dir, vol, ch)
+            if validation.passed:
+                # 章节完成，清理状态
+                cleanup_generation_state(project_dir)
+                
+                # 更新章节索引
+                try:
+                    from chapter_index import update_chapter_index
+                    update_chapter_index(project_dir)
+                except Exception:
+                    pass
+                
+                return _emit(
+                    "chapter_ready",
+                    vol=vol, ch=ch,
+                    chapter_file=str(chapter_file(project_dir, vol, ch)),
+                    card_file=str(card_file),
+                )
+            else:
+                # 验证失败，返回错误
+                return _emit(
+                    "cards_failed",
+                    vol=vol, ch=ch,
+                    issues=[issue.message for issue in validation.issues],
+                )
+        
+        # 工作卡不存在，返回 cards_required（等待子代理生成）
         return _emit(
             "cards_required",
-            vol=vol,
-            ch=ch,
+            vol=vol, ch=ch,
             prompt_file=gen_state.get("card_prompt_file", ""),
             body_file=gen_state.get("body_file", ""),
         )
-    
-    # 处理 task_result_file（消费子代理返回的结果）
-    if task_result_file:
-        
-        # 根据当前阶段决定消费方式
-        if gen_phase in ("body_required", None):
-            # 消费正文结果
-            return _consume_body_result(project_dir, task_result_file, next_vol, next_ch)
-        elif gen_phase in ("cards_required", "body_ready"):
-            # 消费工作卡结果
-            return _consume_cards_result(project_dir, task_result_file, next_vol, next_ch)
-        else:
-            # 默认使用旧的合并消费方式（向后兼容）
-            dispatcher = TaskChapterDispatcher(project_dir)
-            try:
-                raw_result = Path(task_result_file).expanduser().resolve().read_text(encoding="utf-8")
-                consumed = dispatcher.consume_task_result(next_vol, next_ch, raw_result, validate=True)
-            except FileNotFoundError:
-                return _emit("gate_failed", error=f"Task 结果文件不存在: {task_result_file}")
-            except TaskResultError as exc:
-                return _emit("gate_failed", error=str(exc))
-            return _emit(
-                consumed.status,
-                vol=consumed.vol,
-                ch=consumed.ch,
-                body_output=consumed.body_output,
-                card_output=consumed.card_output,
-                issues=consumed.issues,
-            )
     
     # 现有逻辑（检查已完成章节、卷边界等）
     # 使用已缓存的 current_vol, current_ch, next_vol, next_ch

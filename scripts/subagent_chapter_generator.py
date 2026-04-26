@@ -559,7 +559,13 @@ class SubagentChapterGenerator:
    - `chapter_cards` 必须包含 `## 内部工作卡` 标记
    - 六张工作卡（每张用 `### N. 卡片名` 标记）
 
-4. **工作卡格式**
+4. **工作卡格式（严格遵循以下格式要求）**
+
+   **【格式总则】**
+   - 时间字段：必须使用纯数字+单位，不得加"约"、"左右"等修饰词
+   - 资源字段：必须使用 +/-数字+资源名 格式，多个资源用顿号分隔
+   - 悬念强度：必须是1-10的纯整数，不得写"中等"、"一般"等文字
+   - 禁止输出"还剩XX"、"总计XX"等最终状态，只能写增量/减量
 
    ### 1. 状态卡
    - {FIELD_STATUS_LOCATION}：
@@ -567,8 +573,8 @@ class SubagentChapterGenerator:
    - {FIELD_STATUS_EMOTION}：
    - {FIELD_STATUS_GOAL}：
    - {FIELD_STATUS_CHANGE}：
-   - {FIELD_STATUS_ELAPSED}：
-   - {FIELD_STATUS_TIMEPOINT}：
+   - {FIELD_STATUS_ELAPSED}：（格式：X小时/X天/X月；正确："3小时"；错误："约3小时"、"半天左右"）
+   - {FIELD_STATUS_TIMEPOINT}：（格式：第N天+时段 或 YYYY-MM-DD；正确："第1天下午"；错误："工作日下午"）
 
    {PLOT_CARD}
    - {FIELD_PLOT_CONFLICT}：
@@ -578,9 +584,13 @@ class SubagentChapterGenerator:
    - {FIELD_PLOT_PAYOFF}：
 
    ### 3. 资源卡
+   - **【格式强制】获得/消耗/损失 必须使用 +/-数字+资源名**
+   - **【正确示例】获得：+1沟通技巧、+200元现金**
+   - **【正确示例】消耗：-1道具、-50生命值**
+   - **【错误示例】获得：沟通技巧提升、现金奖励（缺少 +/- 和数字）**
    - {FIELD_RESOURCE_GAIN}：
-   - {FIELD_RESOURCE_SPEND}：
-   - {FIELD_RESOURCE_LOSS}：
+   - {FIELD_RESOURCE_SPEND}：（无消耗写"-0"或"无"）
+   - {FIELD_RESOURCE_LOSS}：（无损失写"-0"或"无"）
    - {FIELD_RESOURCE_CARRY}：
    - {FIELD_RESOURCE_SETUP}：
 
@@ -592,7 +602,7 @@ class SubagentChapterGenerator:
    - {FIELD_EMOTION_START}：
    - {FIELD_EMOTION_PROCESS}：
    - {FIELD_EMOTION_TARGET}：
-   - {FIELD_EMOTION_SUSPENSE}：
+   - {FIELD_EMOTION_SUSPENSE}：（格式：1-10纯整数；正确：5；错误："中等"、"5分"）
 
    {CARRY_CARD}
    - {FIELD_CARRY_MUST}：

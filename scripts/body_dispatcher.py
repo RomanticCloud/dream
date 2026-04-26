@@ -217,6 +217,13 @@ class BodyDispatcher:
         
         移除工作卡生成要求，只保留正文生成相关指令
         """
+        # 加载项目状态获取字数范围
+        from common_io import load_project_state
+        state = load_project_state(self.project_dir)
+        specs = state.get("basic_specs", {}) if state else {}
+        min_words = specs.get("chapter_length_min", 2000)
+        max_words = specs.get("chapter_length_max", 2500)
+        
         # 读取完整prompt
         full_prompt = Path(full_prompt_file).read_text(encoding="utf-8")
         
@@ -271,13 +278,62 @@ class BodyDispatcher:
             '"chapter_body" 为完整正文内容'
         )
         
-        # 添加正文专用说明
+        # 添加正文专用说明和自检要求
         body_prompt += """
 
 ## 正文专用说明
 - 本章只需生成正文部分，不需要生成工作卡
 - 工作卡将在正文通过校验后单独生成
 - 确保正文内容完整、连贯、符合字数要求
-"""
+
+## 输出前强制自检（必须执行）
+
+生成完成后、输出前，必须进行以下自检：
+
+1. **字数检查**：
+   - 正文字数必须在 {min_words}-{max_words} 字范围内
+   - 字数统计范围：`## 正文` 到文件末尾之间的纯文本（去除markdown标记）
+
+2. **格式检查**：
+   - `## 正文` 标记必须存在
+   - `## 内部工作卡` 不得出现在正文中
+   - 章节标题格式：`# 第X章 标题`
+
+3. **内容质量检查**：
+   - 不得出现"本章"、"本章中"等自指词汇
+   - 不得出现"微微一笑"、"若有所思"、"喃喃自语道"等模式化表达
+   - 对话要口语化，符合角色身份
+   - 场景切换要有过渡
+
+4. **时间一致性检查**：
+   - 时间线必须合理衔接上一章
+   - 不得与前文的时间描述矛盾
+
+发现问题立即修正，再输出最终版本。
+
+## 输出格式
+
+只允许输出一个 JSON 对象：
+
+```json
+{{
+  "status": "success",
+  "context_manifest_id": "{context_manifest_id}",
+  "files_read": [
+    "manifest.required_read_sequence 里的绝对路径1",
+    "manifest.required_read_sequence 里的绝对路径2"
+  ],
+  "chapter_body": "# 第{ch_num}章 标题\\n\\n## 正文\\n\\n..."
+}}
+```
+
+注意：直接写入文件 `{body_output}`，不要等待主会话确认。
+""".format(
+            min_words=min_words,
+            max_words=max_words,
+            context_manifest_id=manifest_file,  # 使用 manifest_file 作为上下文标识
+            ch_num=ch_num,
+            body_output=chapter_file(self.project_dir, vol_num, ch_num)
+        )
         
         return body_prompt

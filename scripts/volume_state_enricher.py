@@ -203,6 +203,10 @@ def build_volume_memory(project_dir: Path, vol_num: int) -> dict:
         "title": outline.get("卷标题", f"第{vol_num}卷"),
         "volume_goal": outline.get("卷目标", "推进故事"),
         "volume_hook": outline.get("卷尾钩子", outline.get("卷钩子", "")),
+        "volume_position": outline.get("卷定位", ""),
+        "volume_escalation": outline.get("抬升路径", ""),
+        "volume_conflict": outline.get("核心冲突", ""),
+        "volume_turning_points": outline.get("关键转折", ""),
         "characters": ranked_unique(all_names),
         "locations": ranked_unique(all_locations),
         "resources": {
@@ -254,6 +258,19 @@ def write_memory_files(project_dir: Path, volume_memory: dict) -> tuple[Path, Pa
         f"- 卷标题：{volume_memory.get('title', '')}",
         f"- 卷目标：{volume_memory.get('volume_goal', '')}",
         f"- 卷尾钩子：{volume_memory.get('volume_hook', '')}",
+    ]
+    
+    # 新增字段（如果存在）
+    if volume_memory.get("volume_position"):
+        lines.append(f"- 卷定位：{volume_memory['volume_position']}")
+    if volume_memory.get("volume_escalation"):
+        lines.append(f"- 抬升路径：{volume_memory['volume_escalation']}")
+    if volume_memory.get("volume_conflict"):
+        lines.append(f"- 核心冲突：{volume_memory['volume_conflict']}")
+    if volume_memory.get("volume_turning_points"):
+        lines.append(f"- 关键转折：{volume_memory['volume_turning_points']}")
+    
+    lines.extend([
         "",
         "## 卷末稳定状态",
         f"- 位置：{volume_memory['final_state'].get('主角当前位置', '')}",

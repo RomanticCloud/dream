@@ -78,9 +78,19 @@ class CardDispatcher:
     def dispatch(self, vol_num: int, ch_num: int, last_errors: list[str] | None = None, retry_count: int = 0) -> CardDispatchResult:
         """生成工作卡专用prompt"""
         # 1. 读取已生成的正文
-        body_file = chapter_file(self.project_dir, vol_num, ch_num)
-        body_file = body_file.parent / f"{body_file.stem}_body.md"
-        if not body_file.exists():
+        # 支持两种命名：ch03.md（子代理直接写入）和 ch03_body.md（旧格式）
+        chapter_path = chapter_file(self.project_dir, vol_num, ch_num)
+        body_candidates = [
+            chapter_path.parent / f"{chapter_path.stem}_body.md",
+            chapter_path,  # 子代理直接写入的 ch03.md
+        ]
+        body_file = None
+        for candidate in body_candidates:
+            if candidate.exists():
+                body_file = candidate
+                break
+        
+        if not body_file:
             return CardDispatchResult(
                 status="error",
                 prompt_file="",
@@ -196,17 +206,14 @@ class CardDispatcher:
         previous_state = self._load_previous_state(vol_num, ch_num)
         chapter_cards = self._apply_inheritance(chapter_cards, previous_state)
         
-        # 合并正文+工作卡
-        merged = body_text + "\n\n" + chapter_cards
-        
-        # 保存完整章节
+        # 保存纯正文章节（不含工作卡）
         chapter_path = chapter_file(self.project_dir, vol_num, ch_num)
         card_path = chapter_card_file(self.project_dir, vol_num, ch_num)
         
         chapter_path.parent.mkdir(parents=True, exist_ok=True)
         card_path.parent.mkdir(parents=True, exist_ok=True)
         
-        chapter_path.write_text(merged, encoding="utf-8")
+        chapter_path.write_text(body_text, encoding="utf-8")
         card_path.write_text(chapter_cards, encoding="utf-8")
         
         # 执行完整校验（含跨章一致性）
@@ -357,6 +364,10 @@ class CardDispatcher:
     def _generate_card_prompt(self, vol_num: int, ch_num: int, body_text: str, previous_state: dict[str, str], last_errors: list[str] | None = None, retry_count: int = 0) -> str:
         """生成工作卡专用prompt"""
         
+        # 计算输出路径
+        from path_rules import chapter_card_file
+        card_output = chapter_card_file(self.project_dir, vol_num, ch_num)
+        
         retry_info = ""
         if retry_count > 0 and last_errors:
             retry_info = f"""
@@ -458,11 +469,39 @@ class CardDispatcher:
 - 可继承字段（状态卡大部分、资源卡"需带到下章的状态"）如无变化可写"继承上章"或留空
 - 变化字段（情节卡、情绪卡等）必须填写实际值
 
+## 输出前强制自检（必须执行）
+
+生成完成后、输出前，必须进行以下格式检查：
+
+1. **时间字段格式**：
+   - 时间流逝：`^\d+(分钟|小时|天|月)$`  （正确："3小时"；错误："约3小时"）
+   - 时间点：`^第\d+天(清晨|早晨|上午|中午|下午|傍晚|晚上|深夜)$`  （正确："第1天下午"；错误："工作日下午"）
+
+2. **资源字段格式**（强制使用 +/-数字+资源名）：
+   - 正确："+1沟通技巧"、"+200元现金"、"-1道具"
+   - 错误："沟通技巧提升"、"现金奖励"、"得到了200元"
+   - 无消耗/损失时写"-0"或"无"
+
+3. **悬念强度**：
+   - 必须是1-10的纯整数  （正确："5"；错误："中等"、"5分"）
+
+4. **标记检查**：
+   - `## 内部工作卡` 必须存在且在最前面
+   - 6张卡片（1-6）全部存在
+
+5. **内容一致性**：
+   - 工作卡内容必须与正文一致
+   - 不得出现正文中没有的事件或人物
+
+发现问题立即修正，再输出最终版本。
+
 ## 输出协议
 只允许输出一个 JSON 对象：
 {{
   "status": "success",
-  "chapter_cards": "## 内部工作卡\\n\\n### 1. 状态卡\\n..."
+  "chapter_cards": "## 内部工作卡\n\n### 1. 状态卡\n..."
 }}
+
+注意：直接写入文件 `{card_output}`，不要等待主会话确认。
 """
         return prompt

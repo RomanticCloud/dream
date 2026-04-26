@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
@@ -148,6 +149,13 @@ NAMING_REVIEW_OPTIONS = [
 POST_SETUP_ACTION_OPTIONS = [
     {"label": "开始生成正文", "description": "落盘当前设定并进入正文生成主链"},
     {"label": "查看设定总览", "description": "查看当前已锁定的全部前期设定"},
+    {"label": "结束", "description": "结束当前流程"},
+]
+
+OUTLINE_REVIEW_OPTIONS = [
+    {"label": "确认使用此卷纲", "description": "锁定卷纲并开始正文生成"},
+    {"label": "要求修改", "description": "指出需要调整的地方，重新生成"},
+    {"label": "查看设定总览", "description": "查看前期设定后再决定"},
     {"label": "结束", "description": "结束当前流程"},
 ]
 
@@ -1967,14 +1975,124 @@ def handle_post_setup_action_answer(state: SessionState, answer: str) -> dict[st
     if answer == "结束":
         return done_payload(state, "流程已结束。")
     if answer == "查看设定总览":
-        return report_payload(state, "POST_SETUP_SUMMARY", build_project_summary(state))
+        summary = build_project_summary(state)
+        return ask_node(state, "POST_SETUP_ACTION", message=f"{summary}\n\n请继续选择下一步操作：")
+    
+    # 开始生成正文 - 先落盘项目
     project_dir = materialize_project(state)
+    
+    # 检查卷纲是否存在
+    outline_file = project_dir / "reference" / "卷纲总表.md"
+    if not outline_file.exists():
+        # 调用卷纲生成器
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_DIR / "volume_outline_generator.py"),
+                    str(project_dir),
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            gen_result = json.loads(result.stdout)
+            
+            if gen_result.get("status") == "outline_required":
+                # 需要调用LLM生成卷纲
+                prompt_file = gen_result.get("prompt_file")
+                state.temp_data = {
+                    "outline_prompt_file": prompt_file,
+                    "project_dir": str(project_dir),
+                }
+                return {
+                    "status": "outline_required",
+                    "session_id": state.session_id,
+                    "node": "OUTLINE_REQUIRED",
+                    "prompt_file": prompt_file,
+                    "project_dir": str(project_dir),
+                    "message": "项目卷纲尚未生成。请使用外部LLM生成卷纲，然后将结果保存到指定路径。",
+                }
+            elif gen_result.get("status") == "success":
+                # 卷纲已直接生成，进入审阅
+                outline_text = outline_file.read_text(encoding="utf-8")
+                state.temp_data = {
+                    "outline_text": outline_text,
+                    "project_dir": str(project_dir),
+                }
+                return ask_node(
+                    state,
+                    "REVIEW_OUTLINE",
+                    message=f"卷纲已自动生成，请审阅：\n\n{outline_text}\n\n请确认是否使用此卷纲：",
+                )
+            else:
+                return error_payload(state, "POST_SETUP_ACTION", f"卷纲生成返回未知状态: {gen_result}")
+                
+        except subprocess.CalledProcessError as e:
+            return error_payload(state, "POST_SETUP_ACTION", f"卷纲生成失败: {e.stderr}")
+        except json.JSONDecodeError:
+            return error_payload(state, "POST_SETUP_ACTION", "卷纲生成器返回非法JSON")
+    
+    # 卷纲已存在，直接进入正文生成
     return run_script_payload(
         state,
         "WRITING_ENTRY",
         [sys.executable, str(SCRIPT_DIR / "continuous_writer.py"), "run", str(project_dir)],
-        f"已落盘项目状态到 {project_dir}，开始进入正文生成调度。",
+        f"已落盘项目状态到 {project_dir}，卷纲已存在，开始进入正文生成调度。",
     )
+
+
+def handle_review_outline_answer(state: SessionState, answer: str) -> dict[str, Any]:
+    """处理卷纲审阅节点的用户回答"""
+    labels = {option["label"] for option in OUTLINE_REVIEW_OPTIONS}
+    if answer not in labels:
+        return invalid_answer(state, "REVIEW_OUTLINE", "无效选择，重试一次后将安全退出。")
+    
+    state.retry_count["REVIEW_OUTLINE"] = 0
+    state.history.append({"node": "REVIEW_OUTLINE", "answer": answer})
+    
+    if answer == "结束":
+        return done_payload(state, "流程已结束。")
+    
+    if answer == "查看设定总览":
+        summary = build_project_summary(state)
+        outline_text = state.temp_data.get("outline_text", "[卷纲内容未加载]")
+        return ask_node(
+            state,
+            "REVIEW_OUTLINE",
+            message=f"{summary}\n\n---\n\n当前卷纲：\n{outline_text}\n\n请确认是否使用此卷纲：",
+        )
+    
+    if answer == "要求修改":
+        # 清除已保存的卷纲（如果存在），要求重新生成
+        project_dir_str = state.temp_data.get("project_dir", "")
+        if project_dir_str:
+            outline_file = Path(project_dir_str) / "reference" / "卷纲总表.md"
+            if outline_file.exists():
+                outline_file.unlink()
+        
+        # 重新进入生成流程
+        return ask_node(
+            state,
+            "OUTLINE_REVISION",
+            message="请描述您希望如何调整卷纲（例如：'第一卷节奏太慢'、'增加感情线比重'等），或直接输入'重新生成'以获取新方案：",
+        )
+    
+    if answer == "确认使用此卷纲":
+        # 卷纲已保存，直接进入正文生成
+        project_dir_str = state.temp_data.get("project_dir", "")
+        if not project_dir_str:
+            return error_payload(state, "REVIEW_OUTLINE", "项目目录丢失，无法继续。")
+        
+        project_dir = Path(project_dir_str)
+        return run_script_payload(
+            state,
+            "WRITING_ENTRY",
+            [sys.executable, str(SCRIPT_DIR / "continuous_writer.py"), "run", str(project_dir)],
+            f"卷纲已锁定，开始进入正文生成调度。",
+        )
+    
+    return error_payload(state, "REVIEW_OUTLINE", f"未处理的选择: {answer}")
 
 
 def handle_action_menu_answer(state: SessionState, answer: str) -> dict[str, Any]:
@@ -2107,6 +2225,33 @@ def answer(session_id: str, value: Any) -> dict[str, Any]:
         return handle_naming_review_answer(state, normalized)
     if state.current_node == "POST_SETUP_ACTION":
         return handle_post_setup_action_answer(state, normalized)
+    if state.current_node == "REVIEW_OUTLINE":
+        return handle_review_outline_answer(state, normalized)
+    if state.current_node == "OUTLINE_REVISION":
+        # 处理用户对卷纲的修改意见
+        state.history.append({"node": "OUTLINE_REVISION", "answer": normalized})
+        if normalized.lower() in ("重新生成", "regenerate"):
+            # 清除temp_data中的outline_text，重新生成
+            if "outline_text" in state.temp_data:
+                del state.temp_data["outline_text"]
+            # 删除已保存的卷纲文件
+            project_dir_str = state.temp_data.get("project_dir", "")
+            if project_dir_str:
+                outline_file = Path(project_dir_str) / "reference" / "卷纲总表.md"
+                if outline_file.exists():
+                    outline_file.unlink()
+            # 重新进入POST_SETUP_ACTION，让用户再次选择"开始生成正文"
+            return ask_node(state, "POST_SETUP_ACTION", message="已清除当前卷纲。请再次选择'开始生成正文'以重新生成卷纲。")
+        else:
+            # 保存用户的修改意见，用于下次生成时参考
+            state.temp_data["revision_note"] = normalized
+            # 清除当前卷纲，重新生成
+            project_dir_str = state.temp_data.get("project_dir", "")
+            if project_dir_str:
+                outline_file = Path(project_dir_str) / "reference" / "卷纲总表.md"
+                if outline_file.exists():
+                    outline_file.unlink()
+            return ask_node(state, "POST_SETUP_ACTION", message=f"已记录您的修改意见：'{normalized}'。请再次选择'开始生成正文'以重新生成卷纲。")
     if state.current_node == "ACTION_MENU":
         return handle_action_menu_answer(state, normalized)
     if state.current_node == "FINAL_MENU":
@@ -2133,6 +2278,21 @@ def resume(session_id: str) -> dict[str, Any]:
         return done_payload(state, "流程已结束。")
     if state.current_node == "POST_SETUP_SUMMARY":
         return ask_node(state, "POST_SETUP_ACTION")
+    if state.current_node == "REVIEW_OUTLINE":
+        # 恢复卷纲审阅状态
+        outline_text = state.temp_data.get("outline_text", "[卷纲内容未加载]")
+        return ask_node(
+            state,
+            "REVIEW_OUTLINE",
+            message=f"卷纲审阅（恢复会话）：\n\n{outline_text}\n\n请确认是否使用此卷纲：",
+        )
+    if state.current_node == "OUTLINE_REVISION":
+        # 恢复到卷纲审阅，让用户重新选择
+        return ask_node(
+            state,
+            "REVIEW_OUTLINE",
+            message="请重新选择对卷纲的处理方式：",
+        )
     if state.current_node in DERIVE_NODES:
         derive_funcs = {
             "PROTAGONIST_DERIVE": protagonist_derive_request,
