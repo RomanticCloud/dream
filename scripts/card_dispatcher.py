@@ -187,9 +187,12 @@ class CardDispatcher:
                 issues=issues
             )
         
-        # 读取正文
-        body_file = chapter_file(self.project_dir, vol_num, ch_num)
-        body_file = body_file.parent / f"{body_file.stem}_body.md"
+        # 读取正文（支持两种文件命名：chXX.md 和 chXX_body.md）
+        chapter_path = chapter_file(self.project_dir, vol_num, ch_num)
+        body_file = chapter_path.parent / f"{chapter_path.stem}_body.md"
+        if not body_file.exists():
+            # 回退到 chXX.md
+            body_file = chapter_path
         if not body_file.exists():
             return CardConsumeResult(
                 status="body_missing",
@@ -230,7 +233,8 @@ class CardDispatcher:
                 )
         
         # 删除临时正文文件（合并后删除）
-        if body_file.exists():
+        # 只有当 body_file 和 chapter_path 不是同一文件时才删除
+        if body_file.exists() and body_file.resolve() != chapter_path.resolve():
             body_file.unlink()
         
         return CardConsumeResult(
@@ -411,7 +415,7 @@ class CardDispatcher:
 
 ## 本章正文（{len(body_text)} 字）
 
-{body_text[:3000]}
+{body_text[:5000] if len(body_text) <= 5000 else body_text[:5000] + '...'}
 
 ## 要求
 根据正文内容，生成6张工作卡：

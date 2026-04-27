@@ -57,8 +57,13 @@ class BodyDispatcher:
         Returns:
             BodyDispatchResult 包含所有生成所需的文件路径
         """
-        # 1. 构建上下文manifest（复用现有逻辑）
-        result = self.generator.dispatch_chapter_generation(vol_num, ch_num)
+        # 加载当前章规划
+        from chapter_plan_loader import get_chapter_plan, format_chapter_plan_for_prompt
+        chapter_plan = get_chapter_plan(self.project_dir, vol_num, ch_num)
+        chapter_plan_text = format_chapter_plan_for_prompt(chapter_plan) if chapter_plan else ""
+        
+        # 1. 构建上下文manifest（复用现有逻辑，传递chapter_plan）
+        result = self.generator.dispatch_chapter_generation(vol_num, ch_num, chapter_plan=chapter_plan)
         if result.get("status") != "prompt_ready":
             return BodyDispatchResult(
                 status="error",
@@ -227,11 +232,37 @@ class BodyDispatcher:
         # 读取完整prompt
         full_prompt = Path(full_prompt_file).read_text(encoding="utf-8")
         
+        # 加载当前章规划
+        from chapter_plan_loader import get_chapter_plan, format_chapter_plan_for_prompt
+        chapter_plan = get_chapter_plan(self.project_dir, vol_num, ch_num)
+        chapter_plan_text = format_chapter_plan_for_prompt(chapter_plan) if chapter_plan else ""
+        
         # 提取正文相关部分
         # 策略：保留直到"## 输出要求"之前的所有内容
         # 但移除工作卡格式要求部分
         
         body_prompt = full_prompt
+        
+        # 在"当前卷纲约束"之后插入章级规划约束
+        if chapter_plan_text:
+            # 找到合适的位置插入章级规划
+            volume_constraints_marker = "## 当前卷纲约束"
+            if volume_constraints_marker in body_prompt:
+                # 在卷纲约束后插入章规划
+                insert_pos = body_prompt.find(volume_constraints_marker)
+                # 找到卷纲约束部分的结束（下一个 ## 标题）
+                next_section = body_prompt.find("\n## ", insert_pos + len(volume_constraints_marker))
+                if next_section > 0:
+                    body_prompt = (
+                        body_prompt[:next_section] + 
+                        "\n\n" + chapter_plan_text + "\n" +
+                        body_prompt[next_section:]
+                    )
+                else:
+                    body_prompt += "\n\n" + chapter_plan_text + "\n"
+            else:
+                # 如果找不到标记，在prompt开头附近插入
+                body_prompt = chapter_plan_text + "\n\n" + body_prompt
         
         # 移除工作卡格式详细说明（从"4. **工作卡格式**"到"5. **禁止事项**"之间）
         import re

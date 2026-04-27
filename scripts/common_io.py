@@ -90,6 +90,11 @@ def parse_date(text: str) -> tuple[int, int, int]:
             year = int(groups[0])
             month = int(groups[1])
             day = int(groups[2]) if groups[2] else 1
+            # 验证月/日范围
+            if not (1 <= month <= 12):
+                raise ValueError(f"无效的月份: {month}")
+            if not (1 <= day <= 31):
+                raise ValueError(f"无效的日期: {day}")
             return year, month, day
     
     raise ValueError(f"无法解析日期: {text}")
@@ -104,6 +109,8 @@ def format_time_period(hour: int) -> str:
     Returns:
         时段描述：清晨/正午/下午/傍晚/深夜
     """
+    if not isinstance(hour, int) or not (0 <= hour <= 23):
+        raise ValueError(f"hour 必须为 0-23 的整数，当前值: {hour}")
     if 5 <= hour < 11:
         return "清晨"
     elif 11 <= hour < 14:
@@ -119,16 +126,62 @@ def format_time_period(hour: int) -> str:
 def load_project_state(project_dir: Path) -> dict:
     state_file = project_dir / "wizard_state.json"
     if state_file.exists():
-        return json.loads(state_file.read_text(encoding="utf-8"))
+        try:
+            return json.loads(state_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            raise ValueError(f"项目状态文件损坏: {state_file}: {e}") from e
 
     config_file = project_dir / ".project_config.json"
     if config_file.exists():
-        return json.loads(config_file.read_text(encoding="utf-8"))
+        try:
+            return json.loads(config_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            raise ValueError(f"项目配置文件损坏: {config_file}: {e}") from e
 
     return {}
 
 
+def get_chapters_per_volume(project_dir: Path) -> int:
+    """动态获取每卷章节数，不写死默认值
+
+    Args:
+        project_dir: 项目目录
+
+    Returns:
+        每卷章节数
+
+    Raises:
+        ValueError: 无法从项目状态确定每卷章节数
+    """
+    state = load_project_state(project_dir)
+
+    # 优先从 volume_architecture 读取
+    arch = state.get("volume_architecture", {})
+    if isinstance(arch, dict) and "chapters_per_volume" in arch:
+        return arch["chapters_per_volume"]
+
+    # 回退到 basic_specs
+    specs = state.get("basic_specs", {})
+    if "chapters_per_volume" in specs:
+        return specs["chapters_per_volume"]
+
+    # 从 derived 计算结果读取
+    derived = specs.get("derived", {})
+    if "derived_chapters_per_volume" in derived:
+        return derived["derived_chapters_per_volume"]
+
+    # 从目标字数和章节数推算
+    target_chapters = derived.get("target_total_chapters", 0)
+    target_volumes = derived.get("derived_total_volumes", 0)
+    if target_chapters > 0 and target_volumes > 0:
+        return target_chapters // target_volumes
+
+    # 无法确定时抛出异常
+    raise ValueError(f"无法从项目状态确定 chapters_per_volume，请检查 {project_dir} 的配置")
+
+
 def save_project_state(project_dir: Path, state: dict) -> None:
+    project_dir.mkdir(parents=True, exist_ok=True)
     state_file = project_dir / "wizard_state.json"
     state_file.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -259,12 +312,10 @@ def find_chapter_path(project_dir: Path, chapter_num: int) -> Path | None:
     Returns:
         章节文件路径，不存在时返回 None
     """
-    chapters_per_volume = 10  # 默认值
-    state_file = project_dir / "wizard_state.json"
-    if state_file.exists():
-        state = json.loads(state_file.read_text(encoding="utf-8"))
-        specs = state.get("basic_specs", {})
-        chapters_per_volume = specs.get("chapters_per_volume", 10)
+    try:
+        chapters_per_volume = get_chapters_per_volume(project_dir)
+    except ValueError:
+        chapters_per_volume = 10  # 安全回退
 
     vol_num = (chapter_num - 1) // chapters_per_volume + 1
     chapter_in_volume = (chapter_num - 1) % chapters_per_volume + 1

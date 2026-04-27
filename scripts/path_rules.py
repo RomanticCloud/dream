@@ -50,5 +50,9 @@ def volume_memory_md(project_dir: Path, vol_num: int) -> Path:
     return volume_memory_dir(project_dir) / f"vol{vol_num:02d}_state.md"
 
 
+def chapter_outline_file(project_dir: Path, vol_num: int) -> Path:
+    return project_dir / "reference" / f"vol{vol_num:02d}_chapter_outline.md"
+
+
 def project_running_memory_file(project_dir: Path) -> Path:
     return project_dir / "reference" / "PROJECT_RUNNING_MEMORY.md"

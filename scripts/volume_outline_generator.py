@@ -7,21 +7,10 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-
-def load_project_state(project_dir: Path) -> dict:
-    """加载项目状态"""
-    state_file = project_dir / "wizard_state.json"
-    if state_file.exists():
-        return json.loads(state_file.read_text(encoding="utf-8"))
-
-    config_file = project_dir / ".project_config.json"
-    if config_file.exists():
-        return json.loads(config_file.read_text(encoding="utf-8"))
-
-    return {}
+from common_io import load_project_state, get_chapters_per_volume
 
 
-def build_generation_prompt(state: dict) -> str:
+def build_generation_prompt(state: dict, project_dir: Path = None) -> str:
     """构建用于LLM生成卷纲的prompt
     
     基于wizard完整设定，生成结构化的卷纲prompt
@@ -38,7 +27,14 @@ def build_generation_prompt(state: dict) -> str:
     power = state.get("power_system", {})
 
     volume_count = arch.get("volume_count", 10)
-    chapters_per_volume = arch.get("chapters_per_volume", 14)
+    # 动态获取 chapters_per_volume，不写死
+    if project_dir:
+        try:
+            chapters_per_volume = get_chapters_per_volume(project_dir)
+        except ValueError:
+            chapters_per_volume = arch.get("chapters_per_volume", 14)
+    else:
+        chapters_per_volume = arch.get("chapters_per_volume", 14)
     book_title = naming.get("selected_book_title", "未命名")
     target_words = specs.get("target_word_count", "待定")
     chapter_length = specs.get("chapter_length", "2000-2500字")
@@ -200,7 +196,41 @@ def save_outline(project_dir: Path, outline_text: str) -> Path:
     ref_dir.mkdir(exist_ok=True)
     outline_file = ref_dir / "卷纲总表.md"
     outline_file.write_text(outline_text, encoding="utf-8")
+    
+    # 标记所有卷需要生成章级规划
+    _mark_chapter_outlines_pending(project_dir)
+    
     return outline_file
+
+
+def _mark_chapter_outlines_pending(project_dir: Path) -> None:
+    """标记所有卷需要生成章级规划
+    
+    在卷纲总表保存后调用，标记各卷需要章级规划
+    """
+    state_file = project_dir / "wizard_state.json"
+    if not state_file.exists():
+        return
+    
+    import json
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    volume_count = state.get("volume_architecture", {}).get("volume_count", 10)
+    
+    # 创建或更新章节规划状态文件
+    outline_status_file = project_dir / "context" / "chapter_outline_status.json"
+    outline_status_file.parent.mkdir(exist_ok=True)
+    
+    if outline_status_file.exists():
+        status = json.loads(outline_status_file.read_text(encoding="utf-8"))
+    else:
+        status = {"volumes": {}}
+    
+    for vol_num in range(1, volume_count + 1):
+        vol_key = f"vol{vol_num:02d}"
+        if vol_key not in status["volumes"]:
+            status["volumes"][vol_key] = {"status": "pending", "generated_at": None}
+    
+    outline_status_file.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def generate_outline(state: dict, project_dir: Path) -> dict:
@@ -212,7 +242,7 @@ def generate_outline(state: dict, project_dir: Path) -> dict:
         {"status": "success", "outline_file": Path} 或
         {"status": "outline_required", "prompt": str, "project_dir": str}
     """
-    prompt = build_generation_prompt(state)
+    prompt = build_generation_prompt(state, project_dir)
     
     # 尝试直接调用LLM API（如果环境中有配置）
     # 目前通过环境变量检测
@@ -327,10 +357,22 @@ def validate_outline(outline_text: str, expected_volumes: int) -> tuple[bool, li
     # 检查每卷是否有必需字段
     required_fields = ["卷定位", "卷目标", "抬升路径", "核心冲突", "关键转折", "卷尾钩子"]
     
-    for vol_header in volume_headers:
+    lines = outline_text.splitlines()
+    for i, vol_header in enumerate(volume_headers):
         vol_num = vol_header.split("·")[0].strip()
+        # 提取当前卷的文本（从当前卷标题到下一个卷标题或文件末尾）
+        vol_start = lines.index(vol_header) if vol_header in lines else -1
+        if vol_start == -1:
+            continue
+        vol_end = len(lines)
+        for j in range(vol_start + 1, len(lines)):
+            if lines[j].strip().startswith("## 第"):
+                vol_end = j
+                break
+        vol_text = "\n".join(lines[vol_start:vol_end])
+        
         for field in required_fields:
-            if f"- {field}：" not in outline_text:
+            if f"- {field}：" not in vol_text:
                 issues.append(f"{vol_num} 缺少'{field}'字段")
     
     # 检查是否有模板化内容
@@ -369,27 +411,29 @@ def main():
     # 检查是否有 --save 参数（用于保存子代理生成的结果）
     if "--save" in sys.argv:
         save_idx = sys.argv.index("--save")
-        if save_idx + 1 < len(sys.argv):
-            outline_file = Path(sys.argv[save_idx + 1])
-            if outline_file.exists():
-                outline_text = outline_file.read_text(encoding="utf-8")
-                saved_path = save_outline(project_dir, outline_text)
-                
-                # 验证
-                arch = state.get("volume_architecture", {})
-                expected = arch.get("volume_count", 10)
-                is_valid, issues = validate_outline(outline_text, expected)
-                
-                result = {
-                    "status": "success" if is_valid else "warning",
-                    "outline_file": str(saved_path),
-                    "validation": {
-                        "valid": is_valid,
-                        "issues": issues
-                    }
+        if save_idx + 1 >= len(sys.argv):
+            print("错误: --save 需要指定文件路径", file=sys.stderr)
+            sys.exit(1)
+        outline_file = Path(sys.argv[save_idx + 1])
+        if outline_file.exists():
+            outline_text = outline_file.read_text(encoding="utf-8")
+            saved_path = save_outline(project_dir, outline_text)
+            
+            # 验证
+            arch = state.get("volume_architecture", {})
+            expected = arch.get("volume_count", 10)
+            is_valid, issues = validate_outline(outline_text, expected)
+            
+            result = {
+                "status": "success" if is_valid else "warning",
+                "outline_file": str(saved_path),
+                "validation": {
+                    "valid": is_valid,
+                    "issues": issues
                 }
-                print(json.dumps(result, ensure_ascii=False, indent=2))
-                sys.exit(0 if is_valid else 1)
+            }
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            sys.exit(0 if is_valid else 1)
     
     # 正常生成流程
     result = generate_outline(state, project_dir)

@@ -33,16 +33,6 @@ POWER_SYSTEM_OPTIONS = [
     "血脉传承", "功法修炼", "科技装备"
 ]
 
-LEVEL_OPTIONS_BY_SYSTEM = {
-    "体能技击": ["基础期→进阶期→精英期→大师期→宗师期"],
-    "武魂觉醒": ["觉醒者→进阶者→掌控者→觉醒大师→觉醒宗师"],
-    "职业技能": ["初级→中级→高级→专家→大师"],
-    "系统面板": ["Lv1→Lv10→Lv50→Lv100→满级"],
-    "血脉传承": ["觉醒→成熟→完全体→返祖→真祖"],
-    "功法修炼": ["引气→筑基→金丹→元婴→飞升"],
-    "科技装备": ["普通→精良→稀有→史诗→传说"]
-}
-
 BREAKTHROUGH_OPTIONS = [
     "实战胜利积累", "资源消耗", "感悟突破",
     "生死历练", "导师指导", "秘法传承"
@@ -110,9 +100,20 @@ def build_basic_specs(
     main_genres: list[str],
     sub_genres: list[str],
 ) -> dict:
+    # 参数验证
+    if pacing not in PACING_OPTIONS:
+        raise ValueError(f"无效的节奏偏好: {pacing}，可选: {PACING_OPTIONS}")
+    if style_tone not in STYLE_TONE_OPTIONS:
+        raise ValueError(f"无效的文风基调: {style_tone}，可选: {STYLE_TONE_OPTIONS}")
+    for genre in main_genres:
+        if genre not in MAIN_GENRE_OPTIONS:
+            raise ValueError(f"无效的主题材: {genre}，可选: {MAIN_GENRE_OPTIONS}")
+    for genre in sub_genres:
+        if genre not in SUB_GENRE_OPTIONS:
+            raise ValueError(f"无效的补充元素: {genre}，可选: {SUB_GENRE_OPTIONS}")
+
     word_numeric = parse_word_target(word_target)
     chapter_min, chapter_max = parse_chapter_length(chapter_length)
-    chapter_avg = (chapter_min + chapter_max) // 2
 
     derived = describe_target_profile(word_target, chapter_length)
 
@@ -374,7 +375,7 @@ FIRST_GOAL_BY_CONFLICT = {
     "情感纠葛": ["确立核心关系", "完成情感突破", "获得情感支持"],
     "末日危机": ["完成首次危机应对", "建立生存基础", "获得关键力量"],
     "权力争斗": ["获得初始权力", "站稳权力基础", "建立核心团队"],
-    "identity追寻": ["获得关键线索", "确认身份方向", "完成身份突破"]
+    "身份追寻": ["获得关键线索", "确认身份方向", "完成身份突破"]
 }
 
 FIRST_HOOK_BY_CRISIS = {
@@ -419,6 +420,10 @@ def build_volume_architecture(
     book_escalation_path: str,
     delivery_matrix: str,
 ) -> dict:
+    if not isinstance(volume_count, int) or volume_count <= 0:
+        raise ValueError(f"volume_count 必须为正整数，当前值: {volume_count}")
+    if not isinstance(chapters_per_volume, int) or chapters_per_volume <= 0:
+        raise ValueError(f"chapters_per_volume 必须为正整数，当前值: {chapters_per_volume}")
     return {
         "volume_count": volume_count,
         "chapters_per_volume": chapters_per_volume,
@@ -506,7 +511,7 @@ def build_protagonist(
         "core_desire": core_desire,
         "deepest_fear": deepest_fear,
         "long_term_goal": long_term_goal,
-        "ability": ability or "",
+        "ability": ability if ability is not None else "",
     }
 
 
@@ -523,8 +528,8 @@ def build_power_system(
         "levels": levels,
         "breakthrough_condition": breakthrough_condition,
         "limitation": limitation,
-        "unique_trait": unique_trait or "",
-        "resource_economy": resource_economy or "",
+        "unique_trait": unique_trait if unique_trait is not None else "",
+        "resource_economy": resource_economy if resource_economy is not None else "",
     }
 
 

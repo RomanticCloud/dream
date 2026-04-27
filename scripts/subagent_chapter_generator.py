@@ -653,6 +653,7 @@ class SubagentChapterGenerator:
         vol_num: int,
         ch_num: int,
         lookback: int = 0,
+        chapter_plan: Optional[dict] = None,
     ) -> dict:
         """调度章节生成
 
@@ -660,6 +661,7 @@ class SubagentChapterGenerator:
             vol_num: 卷号
             ch_num: 章节号
             lookback: 回溯章节数（0=全部）
+            chapter_plan: 外部传入的章节规划（可选）
 
         Returns:
             {
@@ -684,7 +686,10 @@ class SubagentChapterGenerator:
                 "chapters_loaded": 0,
             }
 
-        chapter_plan = self._load_chapter_plan(vol_num, ch_num)
+        # 优先使用外部传入的chapter_plan，否则从文件加载
+        if chapter_plan is None:
+            chapter_plan = self._load_chapter_plan(vol_num, ch_num)
+        
         revision_status = get_chapter_revision_status(self.project_dir, vol_num, ch_num)
         revision_tasks = get_chapter_revision_tasks(self.project_dir, vol_num, ch_num)
 
@@ -747,8 +752,31 @@ class SubagentChapterGenerator:
     def _load_chapter_plan(self, vol_num: int, ch_num: int) -> Optional[dict]:
         """加载章节规划
 
-        从卷纲中提取当前章节的规划信息
+        优先从新的章级规划文件加载，如果不存在则从卷纲总表提取
         """
+        # 优先尝试从新的章级规划文件加载
+        from path_rules import chapter_outline_file
+        chapter_outline = chapter_outline_file(self.project_dir, vol_num)
+        if chapter_outline.exists():
+            from chapter_plan_loader import get_chapter_plan
+            plan = get_chapter_plan(self.project_dir, vol_num, ch_num)
+            if plan:
+                # 将新格式转换为兼容旧格式的description
+                description_parts = [
+                    f"## 第{plan['ch']}章 · {plan['title']}",
+                    f"- 核心事件：{plan['core_event']}",
+                    f"- 角色状态：{plan['character_state']}",
+                ]
+                if plan.get("must_appear"):
+                    description_parts.append(f"- 必须出现：{', '.join(plan['must_appear'])}")
+                if plan.get("must_payoff"):
+                    description_parts.append(f"- 必须回收：{', '.join(plan['must_payoff'])}")
+                if plan.get("new_setup"):
+                    description_parts.append(f"- 新埋伏笔：{', '.join(plan['new_setup'])}")
+                description_parts.append(f"- 悬念强度：{plan['suspense']}")
+                return {"description": "\n".join(description_parts)}
+        
+        # 回退到从卷纲总表提取（兼容旧逻辑）
         outline_file = self.project_dir / "reference" / "卷纲总表.md"
         if not outline_file.exists():
             return None

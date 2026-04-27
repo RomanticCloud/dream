@@ -76,8 +76,8 @@ def validate_body(body_text: str, project_dir: Path, vol_num: int, ch_num: int) 
                 "warning",
                 f"正文字数 {word_count} 字，超过最大值 {max_words} 字"
             ))
-    except Exception:
-        pass  # 如果无法读取配置，跳过字数校验
+    except Exception as exc:
+        issues.append(BodyValidationIssue("error", f"字数校验配置错误: {exc}"))
     
     # 3. 生成质量报告（主观标准，不返回为 issues）
     quality_report = _generate_quality_report(body_text, word_count)
@@ -134,7 +134,8 @@ def _generate_quality_report(content: str, word_count: int) -> dict:
         report["metrics"]["ai_traces"] = ai_traces
     
     # 2. 段落长度分析
-    paragraphs = [p.strip() for p in body.split('\n\n') if p.strip()]
+    # 同时支持单换行和双换行分段
+    paragraphs = [p.strip() for p in re.split(r'\n{1,2}', body) if p.strip()]
     if paragraphs:
         long_paragraphs = [p for p in paragraphs if count_words(p) > 500]
         report["metrics"]["paragraphs"] = {

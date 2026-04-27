@@ -146,17 +146,46 @@ NAMING_REVIEW_OPTIONS = [
     {"label": "退出", "description": "结束当前流程"},
 ]
 
-POST_SETUP_ACTION_OPTIONS = [
-    {"label": "开始生成正文", "description": "落盘当前设定并进入正文生成主链"},
+POST_SETUP_ACTION_1_OPTIONS = [
+    {"label": "生成卷纲", "description": "落盘当前设定并进入卷纲生成阶段"},
+    {"label": "查看设定总览", "description": "查看当前已锁定的全部前期设定"},
+    {"label": "结束", "description": "结束当前流程"},
+]
+
+POST_SETUP_ACTION_2_OPTIONS = [
+    {"label": "生成章级规划", "description": "进入第1卷章级规划生成阶段"},
+    {"label": "查看设定总览", "description": "查看当前已锁定的全部前期设定"},
+    {"label": "结束", "description": "结束当前流程"},
+]
+
+POST_SETUP_ACTION_3_OPTIONS = [
+    {"label": "开始生成正文", "description": "进入正文生成主链"},
     {"label": "查看设定总览", "description": "查看当前已锁定的全部前期设定"},
     {"label": "结束", "description": "结束当前流程"},
 ]
 
 OUTLINE_REVIEW_OPTIONS = [
-    {"label": "确认使用此卷纲", "description": "锁定卷纲并开始正文生成"},
+    {"label": "确认使用此卷纲", "description": "锁定卷纲并进入章级规划阶段"},
     {"label": "要求修改", "description": "指出需要调整的地方，重新生成"},
     {"label": "查看设定总览", "description": "查看前期设定后再决定"},
     {"label": "结束", "description": "结束当前流程"},
+]
+
+CHAPTER_OUTLINE_REVIEW_OPTIONS = [
+    {"label": "确认使用此章级规划", "description": "锁定章级规划并继续"},
+    {"label": "要求修改", "description": "指出需要调整的地方，重新生成"},
+    {"label": "查看设定总览", "description": "查看前期设定后再决定"},
+    {"label": "结束", "description": "结束当前流程"},
+]
+
+GENERATE_OUTLINE_OPTIONS = [
+    {"label": "生成卷纲", "description": "使用外部LLM生成卷纲总表"},
+    {"label": "退出", "description": "结束当前流程"},
+]
+
+GENERATE_CHAPTER_OUTLINE_OPTIONS = [
+    {"label": "生成章级规划", "description": "使用外部LLM生成章级规划"},
+    {"label": "退出", "description": "结束当前流程"},
 ]
 
 PROTAGONIST_FIELD_SPECS = [
@@ -245,6 +274,7 @@ class SessionState:
     lock_mode: str | None = None
     derive_context: dict[str, Any] = field(default_factory=dict)
     derive_retry_count: dict[str, int] = field(default_factory=dict)
+    temp_data: dict[str, Any] = field(default_factory=dict)
 
 
 QUESTION_DEFS = {
@@ -259,6 +289,13 @@ QUESTION_DEFS = {
         "text": "请选择要继续的项目：",
         "options": [],
         "multiple": False,
+    },
+    "OUTLINE_REVISION": {
+        "header": "卷纲修改",
+        "text": "请描述您希望如何调整卷纲（例如：'第一卷节奏太慢'、'增加感情线比重'等），或直接输入'重新生成'以获取新方案：",
+        "options": [],
+        "multiple": False,
+        "input_mode": "text",
     },
     "BASIC_SPECS_WORD_TARGET": {
         "header": "目标字数",
@@ -382,10 +419,46 @@ QUESTION_DEFS = {
         "options": NAMING_REVIEW_OPTIONS,
         "multiple": False,
     },
-    "POST_SETUP_ACTION": {
+    "POST_SETUP_ACTION_1": {
         "header": "后续动作",
         "text": "全部前期设定已完成，请选择下一步：",
-        "options": POST_SETUP_ACTION_OPTIONS,
+        "options": POST_SETUP_ACTION_1_OPTIONS,
+        "multiple": False,
+    },
+    "POST_SETUP_ACTION_2": {
+        "header": "后续动作",
+        "text": "卷纲已确认，请选择下一步：",
+        "options": POST_SETUP_ACTION_2_OPTIONS,
+        "multiple": False,
+    },
+    "POST_SETUP_ACTION_3": {
+        "header": "后续动作",
+        "text": "章级规划已确认，请选择下一步：",
+        "options": POST_SETUP_ACTION_3_OPTIONS,
+        "multiple": False,
+    },
+    "GENERATE_OUTLINE_CONFIRM": {
+        "header": "生成卷纲确认",
+        "text": "项目卷纲尚未生成，是否进入卷纲生成阶段？",
+        "options": GENERATE_OUTLINE_OPTIONS,
+        "multiple": False,
+    },
+    "GENERATE_CHAPTER_OUTLINE_CONFIRM": {
+        "header": "生成章级规划确认",
+        "text": "章级规划尚未生成，是否进入章级规划生成阶段？",
+        "options": GENERATE_CHAPTER_OUTLINE_OPTIONS,
+        "multiple": False,
+    },
+    "CHAPTER_OUTLINE_REVIEW": {
+        "header": "章级规划审阅",
+        "text": "章级规划已生成，请审阅：",
+        "options": CHAPTER_OUTLINE_REVIEW_OPTIONS,
+        "multiple": False,
+    },
+    "REVIEW_OUTLINE": {
+        "header": "卷纲审阅",
+        "text": "卷纲已生成，请审阅：",
+        "options": OUTLINE_REVIEW_OPTIONS,
         "multiple": False,
     },
     "ACTION_MENU": {
@@ -416,21 +489,56 @@ def ensure_runtime_dir() -> None:
 
 
 def session_file(session_id: str) -> Path:
+    if not re.match(r'^dream-[a-f0-9]{12}$', session_id):
+        raise ValueError(f"无效的会话ID格式: {session_id}")
     return RUNTIME_DIR / f"session_{session_id}.json"
 
 
 def save_session(state: SessionState) -> None:
     ensure_runtime_dir()
     state.updated_at = now_iso()
-    session_file(state.session_id).write_text(
+    target = session_file(state.session_id)
+    tmp = target.with_suffix(".tmp")
+    tmp.write_text(
         json.dumps(asdict(state), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    tmp.rename(target)
 
 
 def load_session(session_id: str) -> SessionState:
-    data = json.loads(session_file(session_id).read_text(encoding="utf-8"))
+    path = session_file(session_id)
+    if not path.exists():
+        raise FileNotFoundError(f"会话 {session_id} 不存在")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"会话文件损坏: {e}") from e
     return SessionState(**data)
+
+
+def load_instructions(statuses: list[str]) -> str:
+    """从 docs/protocol.md 加载指定 statuses 的 instructions"""
+    protocol_file = SKILL_DIR / "docs" / "protocol.md"
+    if not protocol_file.exists():
+        return ""
+
+    content = protocol_file.read_text(encoding="utf-8")
+    instructions = []
+
+    # 提取通用规则
+    general_match = re.search(r"## 通用规则\n(.*?)(?=## Status)", content, re.DOTALL)
+    if general_match:
+        instructions.append(general_match.group(1).strip())
+
+    # 提取指定 statuses 的规则
+    for status in statuses:
+        pattern = rf"### {status}\n(.*?)(?=### |\Z)"
+        match = re.search(pattern, content, re.DOTALL)
+        if match:
+            instructions.append(f"### {status}\n{match.group(1).strip()}")
+
+    return "\n\n".join(instructions)
 
 
 def emit(payload: dict[str, Any]) -> int:
@@ -454,7 +562,12 @@ def question_payload(
     input_mode: str = "choice",
     min_select: int | None = None,
     max_select: int | None = None,
+    statuses: list[str] | None = None,
 ) -> dict[str, Any]:
+    if statuses is None and node == "REVIEW_OUTLINE":
+        statuses = ["question", "outline_required", "chapter_outline_required", "run_script", "body_required", "cards_required", "chapter_ready", "done", "error"]
+    elif statuses is None:
+        statuses = ["question", "done", "error"]
     state.current_node = node
     save_session(state)
     payload: dict[str, Any] = {
@@ -462,6 +575,7 @@ def question_payload(
         "next_action": "ask_user",
         "session_id": state.session_id,
         "node": node,
+        "instructions": load_instructions(statuses),
         "question": {
             "header": header,
             "text": text,
@@ -583,6 +697,7 @@ def report_payload(state: SessionState, node: str, message: str) -> dict[str, An
         "next_action": "show_message",
         "session_id": state.session_id,
         "node": node,
+        "instructions": load_instructions(["report", "done", "error"]),
         "message": message,
     }
 
@@ -595,6 +710,7 @@ def done_payload(state: SessionState, message: str) -> dict[str, Any]:
         "next_action": "stop",
         "session_id": state.session_id,
         "node": "DONE",
+        "instructions": load_instructions(["done"]),
         "message": message,
     }
 
@@ -605,11 +721,12 @@ def error_payload(state: SessionState | None, node: str, message: str) -> dict[s
         "next_action": "stop",
         "session_id": state.session_id if state else None,
         "node": node,
+        "instructions": load_instructions(["error"]),
         "message": message,
     }
 
 
-def derive_payload(state: SessionState, node: str, derive: dict[str, Any], message: str | None = None) -> dict[str, Any]:
+def derive_payload(state: SessionState, node: str, derive: dict[str, Any], message: str | None = None, statuses: list[str] | None = None) -> dict[str, Any]:
     state.current_node = node
     save_session(state)
     payload = {
@@ -617,6 +734,7 @@ def derive_payload(state: SessionState, node: str, derive: dict[str, Any], messa
         "next_action": "derive_with_model",
         "session_id": state.session_id,
         "node": node,
+        "instructions": load_instructions(statuses or ["derive", "done", "error"]),
         "derive": derive,
     }
     if message:
@@ -624,7 +742,7 @@ def derive_payload(state: SessionState, node: str, derive: dict[str, Any], messa
     return payload
 
 
-def run_script_payload(state: SessionState, node: str, command: list[str], message: str) -> dict[str, Any]:
+def run_script_payload(state: SessionState, node: str, command: list[str], message: str, statuses: list[str] | None = None) -> dict[str, Any]:
     state.current_node = node
     save_session(state)
     return {
@@ -632,12 +750,57 @@ def run_script_payload(state: SessionState, node: str, command: list[str], messa
         "next_action": "execute_script",
         "session_id": state.session_id,
         "node": node,
+        "instructions": load_instructions(statuses or ["run_script", "body_required", "cards_required", "chapter_ready", "done", "error"]),
         "message": message,
         "script": {
             "kind": "python",
             "command": command,
         },
     }
+
+
+def outline_required_payload(state: SessionState, project_dir: Path, prompt_file: str, message: str | None = None) -> dict[str, Any]:
+    state.current_node = "OUTLINE_REQUIRED"
+    state.temp_data = {
+        "outline_prompt_file": prompt_file,
+        "project_dir": str(project_dir),
+    }
+    save_session(state)
+    payload: dict[str, Any] = {
+        "status": "outline_required",
+        "next_action": "generate_outline",
+        "session_id": state.session_id,
+        "node": "OUTLINE_REQUIRED",
+        "instructions": load_instructions(["outline_required", "chapter_outline_required", "run_script", "body_required", "cards_required", "chapter_ready", "done", "error"]),
+        "prompt_file": prompt_file,
+        "project_dir": str(project_dir),
+    }
+    if message:
+        payload["message"] = message
+    return payload
+
+
+def chapter_outline_required_payload(state: SessionState, project_dir: Path, prompt_file: str, vol: int, message: str | None = None) -> dict[str, Any]:
+    state.current_node = "CHAPTER_OUTLINE_REQUIRED"
+    state.temp_data = {
+        "chapter_outline_prompt_file": prompt_file,
+        "project_dir": str(project_dir),
+        "vol": vol,
+    }
+    save_session(state)
+    payload: dict[str, Any] = {
+        "status": "chapter_outline_required",
+        "next_action": "generate_chapter_outline",
+        "session_id": state.session_id,
+        "node": "CHAPTER_OUTLINE_REQUIRED",
+        "instructions": load_instructions(["chapter_outline_required", "run_script", "body_required", "cards_required", "chapter_ready", "done", "error"]),
+        "prompt_file": prompt_file,
+        "project_dir": str(project_dir),
+        "vol": vol,
+    }
+    if message:
+        payload["message"] = message
+    return payload
 
 
 def empty_new_project_state() -> dict[str, Any]:
@@ -747,6 +910,8 @@ def normalize_answer(raw: str) -> str:
 
 
 def normalize_value(raw: Any) -> Any:
+    if raw is None:
+        return ""
     if isinstance(raw, list):
         return [normalize_answer(str(item)) for item in raw if normalize_answer(str(item))]
     if not isinstance(raw, str):
@@ -768,7 +933,7 @@ def normalize_value(raw: Any) -> Any:
 def invalid_answer(state: SessionState, node: str, message: str) -> dict[str, Any]:
     retries = state.retry_count.get(node, 0) + 1
     state.retry_count[node] = retries
-    if retries >= 2:
+    if retries >= 3:  # 允许2次重试（第3次退出）
         return error_payload(state, node, message)
     state.history.append({"node": node, "answer": None, "result": "retry"})
     return ask_node(state, node, message=message)
@@ -1403,7 +1568,7 @@ def validate_protagonist_derive_payload(payload: dict[str, Any]) -> tuple[bool, 
         if len(normalized_candidates) > 3:
             return False, f"candidates.{candidate_key} 超过 3 个候选。"
         if normalize_answer(rec_value) not in normalized_candidates:
-            return False, f"recommended.{field} 不在 {candidate_key} 中。"
+            return False, f"recommended.{field} 不在 {candidate_key} 中。注意：recommended 的值必须是 candidates 列表中的某一项，且必须完全匹配（包括标点、空格等）。请确保两者完全一致。"
         payload["recommended"][field] = normalize_answer(rec_value)
         payload["candidates"][candidate_key] = normalized_candidates
     payload["reason"] = reason.strip()
@@ -1441,16 +1606,16 @@ def validate_generic_derive_payload(payload: dict[str, Any], field_specs: list[t
                 return False, f"recommended.{field} 缺失或格式错误。"
             normalized_rec = list(dict.fromkeys(normalized_rec))
             if not normalized_rec or len(normalized_rec) < min_select or len(normalized_rec) > max_select:
-                return False, f"recommended.{field} 数量不合法。"
+                return False, f"recommended.{field} 数量不合法。当前数量：{len(normalized_rec)}，要求范围：{min_select}-{max_select}。请调整数量后重新提交。"
             if any(item not in normalized_candidates for item in normalized_rec):
-                return False, f"recommended.{field} 不在 {candidate_key} 中。"
+                return False, f"recommended.{field} 不在 {candidate_key} 中。注意：recommended 的每一项必须是 candidates 列表中的某一项，且必须完全匹配（包括标点、空格等）。请确保两者完全一致。"
             payload["recommended"][field] = normalized_rec
         else:
             if not isinstance(rec_value, str) or not normalize_answer(rec_value):
                 return False, f"recommended.{field} 缺失或为空。"
             normalized_single = normalize_answer(rec_value)
             if normalized_single not in normalized_candidates:
-                return False, f"recommended.{field} 不在 {candidate_key} 中。"
+                return False, f"recommended.{field} 不在 {candidate_key} 中。注意：recommended 的值必须是 candidates 列表中的某一项，且必须完全匹配（包括标点、空格等）。请确保两者完全一致。"
             payload["recommended"][field] = normalized_single
         payload["candidates"][candidate_key] = normalized_candidates
     payload["reason"] = reason.strip()
@@ -1498,7 +1663,10 @@ def build_characters_from_values(values: dict[str, Any]) -> dict[str, Any]:
 def build_volume_from_values(state: SessionState, values: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     specs = (ensure_new_project(state).get("basic_specs") or {})
     batch_size_label = values.get("batch_size_label") or "10章"
-    batch_size = int(str(batch_size_label).rstrip("章"))
+    try:
+        batch_size = int(str(batch_size_label).rstrip("章"))
+    except ValueError:
+        batch_size = 10  # 安全回退
     arch = build_volume_architecture(specs.get("target_volumes_numeric") or 0, specs.get("chapters_per_volume") or 0, values.get("book_escalation_path") or "", values.get("delivery_matrix") or "")
     batch = build_batch_plan(batch_size, values.get("first_volume_goal") or "", values.get("first_volume_hook") or "", values.get("first_batch_opening_mode") or "")
     return arch, batch
@@ -1963,22 +2131,23 @@ def handle_naming_review_answer(state: SessionState, answer: str) -> dict[str, A
         project["naming"] = None
         return ask_node(state, NAMING_FIELD_SPECS[0][1])
     ensure_new_project(state)["stage"] = "naming_locked"
-    return ask_node(state, "POST_SETUP_ACTION", message="全部前期设定已锁定完成。")
+    return ask_node(state, "POST_SETUP_ACTION_1", message="全部前期设定已锁定完成。")
 
 
-def handle_post_setup_action_answer(state: SessionState, answer: str) -> dict[str, Any]:
-    labels = {option["label"] for option in POST_SETUP_ACTION_OPTIONS}
+def handle_post_setup_action_1_answer(state: SessionState, answer: str) -> dict[str, Any]:
+    """处理 POST_SETUP_ACTION_1：设定完成后的动作选择（生成卷纲/查看设定总览/结束）"""
+    labels = {option["label"] for option in POST_SETUP_ACTION_1_OPTIONS}
     if answer not in labels:
-        return invalid_answer(state, "POST_SETUP_ACTION", "无效动作，重试一次后将安全退出。")
-    state.retry_count["POST_SETUP_ACTION"] = 0
-    state.history.append({"node": "POST_SETUP_ACTION", "answer": answer})
+        return invalid_answer(state, "POST_SETUP_ACTION_1", "无效动作，重试一次后将安全退出。")
+    state.retry_count["POST_SETUP_ACTION_1"] = 0
+    state.history.append({"node": "POST_SETUP_ACTION_1", "answer": answer})
     if answer == "结束":
         return done_payload(state, "流程已结束。")
     if answer == "查看设定总览":
         summary = build_project_summary(state)
-        return ask_node(state, "POST_SETUP_ACTION", message=f"{summary}\n\n请继续选择下一步操作：")
+        return ask_node(state, "POST_SETUP_ACTION_1", message=f"{summary}\n\n请继续选择下一步操作：")
     
-    # 开始生成正文 - 先落盘项目
+    # 生成卷纲 - 先落盘项目
     project_dir = materialize_project(state)
     
     # 检查卷纲是否存在
@@ -1999,20 +2168,14 @@ def handle_post_setup_action_answer(state: SessionState, answer: str) -> dict[st
             gen_result = json.loads(result.stdout)
             
             if gen_result.get("status") == "outline_required":
-                # 需要调用LLM生成卷纲
+                # 需要调用LLM生成卷纲，直接进入生成状态
                 prompt_file = gen_result.get("prompt_file")
-                state.temp_data = {
-                    "outline_prompt_file": prompt_file,
-                    "project_dir": str(project_dir),
-                }
-                return {
-                    "status": "outline_required",
-                    "session_id": state.session_id,
-                    "node": "OUTLINE_REQUIRED",
-                    "prompt_file": prompt_file,
-                    "project_dir": str(project_dir),
-                    "message": "项目卷纲尚未生成。请使用外部LLM生成卷纲，然后将结果保存到指定路径。",
-                }
+                return outline_required_payload(
+                    state,
+                    project_dir,
+                    prompt_file,
+                    message=f"项目卷纲尚未生成。prompt文件已保存到：{prompt_file}\n\n请使用外部LLM生成卷纲，然后将结果保存到指定路径。",
+                )
             elif gen_result.get("status") == "success":
                 # 卷纲已直接生成，进入审阅
                 outline_text = outline_file.read_text(encoding="utf-8")
@@ -2026,20 +2189,281 @@ def handle_post_setup_action_answer(state: SessionState, answer: str) -> dict[st
                     message=f"卷纲已自动生成，请审阅：\n\n{outline_text}\n\n请确认是否使用此卷纲：",
                 )
             else:
-                return error_payload(state, "POST_SETUP_ACTION", f"卷纲生成返回未知状态: {gen_result}")
+                return error_payload(state, "POST_SETUP_ACTION_1", f"卷纲生成返回未知状态: {gen_result}")
                 
         except subprocess.CalledProcessError as e:
-            return error_payload(state, "POST_SETUP_ACTION", f"卷纲生成失败: {e.stderr}")
+            return error_payload(state, "POST_SETUP_ACTION_1", f"卷纲生成失败: {e.stderr}")
         except json.JSONDecodeError:
-            return error_payload(state, "POST_SETUP_ACTION", "卷纲生成器返回非法JSON")
+            return error_payload(state, "POST_SETUP_ACTION_1", "卷纲生成器返回非法JSON")
     
-    # 卷纲已存在，直接进入正文生成
+    # 卷纲已存在，进入审阅
+    outline_text = outline_file.read_text(encoding="utf-8")
+    state.temp_data = {
+        "outline_text": outline_text,
+        "project_dir": str(project_dir),
+    }
+    return ask_node(
+        state,
+        "REVIEW_OUTLINE",
+        message=f"卷纲已存在，请审阅：\n\n{outline_text}\n\n请确认是否使用此卷纲：",
+    )
+
+
+def handle_post_setup_action_2_answer(state: SessionState, answer: str) -> dict[str, Any]:
+    """处理 POST_SETUP_ACTION_2：卷纲确认后的动作选择（生成章级规划/查看设定总览/结束）"""
+    labels = {option["label"] for option in POST_SETUP_ACTION_2_OPTIONS}
+    if answer not in labels:
+        return invalid_answer(state, "POST_SETUP_ACTION_2", "无效动作，重试一次后将安全退出。")
+    state.retry_count["POST_SETUP_ACTION_2"] = 0
+    state.history.append({"node": "POST_SETUP_ACTION_2", "answer": answer})
+    if answer == "结束":
+        return done_payload(state, "流程已结束。")
+    if answer == "查看设定总览":
+        summary = build_project_summary(state)
+        return ask_node(state, "POST_SETUP_ACTION_2", message=f"{summary}\n\n请继续选择下一步操作：")
+    
+    # 生成章级规划
+    project_dir_str = state.temp_data.get("project_dir", "")
+    if not project_dir_str:
+        return error_payload(state, "POST_SETUP_ACTION_2", "项目目录未找到，请重新开始。")
+    project_dir = Path(project_dir_str)
+    
+    from chapter_plan_loader import check_volume_has_outline
+    if not check_volume_has_outline(project_dir, 1):
+        # 第1卷缺少章级规划，需要生成
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_DIR / "chapter_outline_generator.py"),
+                    str(project_dir),
+                    "1",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            gen_result = json.loads(result.stdout)
+            
+            if gen_result.get("status") == "chapter_outline_required":
+                # 需要调用LLM生成章级规划，先让用户确认
+                prompt_file = gen_result.get("prompt_file")
+                state.temp_data["chapter_outline_prompt_file"] = prompt_file
+                state.temp_data["vol"] = 1
+                return ask_node(
+                    state,
+                    "GENERATE_CHAPTER_OUTLINE_CONFIRM",
+                    message=f"第1卷章级规划尚未生成。prompt文件已保存到：{prompt_file}\n\n是否进入章级规划生成阶段？",
+                )
+            elif gen_result.get("status") == "success":
+                # 章级规划已直接生成，进入审阅
+                from path_rules import chapter_outline_file
+                outline_file = chapter_outline_file(project_dir, 1)
+                outline_text = outline_file.read_text(encoding="utf-8")
+                state.temp_data["chapter_outline_text"] = outline_text
+                return ask_node(
+                    state,
+                    "CHAPTER_OUTLINE_REVIEW",
+                    message=f"章级规划已自动生成，请审阅：\n\n{outline_text}",
+                )
+            else:
+                return error_payload(state, "POST_SETUP_ACTION_2", f"章级规划生成返回未知状态: {gen_result}")
+                
+        except subprocess.CalledProcessError as e:
+            return error_payload(state, "POST_SETUP_ACTION_2", f"章级规划生成失败: {e.stderr}")
+        except json.JSONDecodeError:
+            return error_payload(state, "POST_SETUP_ACTION_2", "章级规划生成器返回非法JSON")
+    
+    # 章级规划已存在，进入审阅
+    from path_rules import chapter_outline_file
+    from chapter_plan_loader import load_volume_chapters
+    outline_file = chapter_outline_file(project_dir, 1)
+    outline_text = outline_file.read_text(encoding="utf-8")
+    state.temp_data["chapter_outline_text"] = outline_text
+    return ask_node(
+        state,
+        "CHAPTER_OUTLINE_REVIEW",
+        message=f"章级规划已存在，请审阅：\n\n{outline_text}",
+    )
+
+
+def handle_post_setup_action_3_answer(state: SessionState, answer: str) -> dict[str, Any]:
+    """处理 POST_SETUP_ACTION_3：章级规划确认后的动作选择（开始生成正文/查看设定总览/结束）"""
+    labels = {option["label"] for option in POST_SETUP_ACTION_3_OPTIONS}
+    if answer not in labels:
+        return invalid_answer(state, "POST_SETUP_ACTION_3", "无效动作，重试一次后将安全退出。")
+    state.retry_count["POST_SETUP_ACTION_3"] = 0
+    state.history.append({"node": "POST_SETUP_ACTION_3", "answer": answer})
+    if answer == "结束":
+        return done_payload(state, "流程已结束。")
+    if answer == "查看设定总览":
+        summary = build_project_summary(state)
+        return ask_node(state, "POST_SETUP_ACTION_3", message=f"{summary}\n\n请继续选择下一步操作：")
+    
+    # 开始生成正文
+    project_dir_str = state.temp_data.get("project_dir", "")
+    if not project_dir_str:
+        return error_payload(state, "POST_SETUP_ACTION_3", "项目目录未找到，请重新开始。")
+    project_dir = Path(project_dir_str)
+    
     return run_script_payload(
         state,
         "WRITING_ENTRY",
         [sys.executable, str(SCRIPT_DIR / "continuous_writer.py"), "run", str(project_dir)],
-        f"已落盘项目状态到 {project_dir}，卷纲已存在，开始进入正文生成调度。",
+        f"已落盘项目状态到 {project_dir}，卷纲和章级规划已确认，开始进入正文生成调度。",
     )
+
+
+def handle_generate_outline_confirm_answer(state: SessionState, answer: str) -> dict[str, Any]:
+    """处理生成卷纲确认节点的用户回答"""
+    labels = {option["label"] for option in GENERATE_OUTLINE_OPTIONS}
+    if answer not in labels:
+        return invalid_answer(state, "GENERATE_OUTLINE_CONFIRM", "无效选择，重试一次后将安全退出。")
+    state.retry_count["GENERATE_OUTLINE_CONFIRM"] = 0
+    state.history.append({"node": "GENERATE_OUTLINE_CONFIRM", "answer": answer})
+    
+    if answer == "退出":
+        return done_payload(state, "流程已结束。")
+    
+    # 用户确认生成卷纲，进入 outline_required 状态
+    project_dir_str = state.temp_data.get("project_dir", "")
+    prompt_file = state.temp_data.get("outline_prompt_file", "")
+    if not project_dir_str or not prompt_file:
+        return error_payload(state, "GENERATE_OUTLINE_CONFIRM", "项目目录或prompt文件丢失，无法继续。")
+    
+    return outline_required_payload(
+        state,
+        Path(project_dir_str),
+        prompt_file,
+        message="项目卷纲尚未生成。请使用外部LLM生成卷纲，然后将结果保存到指定路径。",
+    )
+
+
+def handle_generate_chapter_outline_confirm_answer(state: SessionState, answer: str) -> dict[str, Any]:
+    """处理生成章级规划确认节点的用户回答"""
+    labels = {option["label"] for option in GENERATE_CHAPTER_OUTLINE_OPTIONS}
+    if answer not in labels:
+        return invalid_answer(state, "GENERATE_CHAPTER_OUTLINE_CONFIRM", "无效选择，重试一次后将安全退出。")
+    state.retry_count["GENERATE_CHAPTER_OUTLINE_CONFIRM"] = 0
+    state.history.append({"node": "GENERATE_CHAPTER_OUTLINE_CONFIRM", "answer": answer})
+    
+    if answer == "退出":
+        return done_payload(state, "流程已结束。")
+    
+    # 用户确认生成章级规划，进入 chapter_outline_required 状态
+    project_dir_str = state.temp_data.get("project_dir", "")
+    prompt_file = state.temp_data.get("chapter_outline_prompt_file", "")
+    vol = state.temp_data.get("vol", 1)
+    if not project_dir_str or not prompt_file:
+        return error_payload(state, "GENERATE_CHAPTER_OUTLINE_CONFIRM", "项目目录或prompt文件丢失，无法继续。")
+    
+    return chapter_outline_required_payload(
+        state,
+        Path(project_dir_str),
+        prompt_file,
+        vol=vol,
+        message=f"第{vol}卷章级规划尚未生成。请使用外部LLM生成章级规划，然后将结果保存到指定路径。",
+    )
+
+
+def handle_outline_required_answer(state: SessionState, answer: str) -> dict[str, Any]:
+    """处理卷纲待生成节点的用户回答"""
+    state.history.append({"node": "OUTLINE_REQUIRED", "answer": answer})
+    
+    project_dir_str = state.temp_data.get("project_dir", "")
+    if not project_dir_str:
+        return error_payload(state, "OUTLINE_REQUIRED", "项目目录丢失，无法继续。")
+    
+    project_dir = Path(project_dir_str)
+    outline_file = project_dir / "reference" / "卷纲总表.md"
+    
+    if not outline_file.exists():
+        return error_payload(
+            state,
+            "OUTLINE_REQUIRED",
+            f"卷纲文件尚未生成，请确认已将卷纲保存到 {outline_file} 后再提交。",
+        )
+    
+    # 卷纲已生成，进入审阅
+    outline_text = outline_file.read_text(encoding="utf-8")
+    state.temp_data["outline_text"] = outline_text
+    
+    return ask_node(
+        state,
+        "REVIEW_OUTLINE",
+        message=f"卷纲已生成，请审阅：\n\n{outline_text}\n\n请确认是否使用此卷纲：",
+    )
+
+
+def handle_chapter_outline_required_answer(state: SessionState, answer: str) -> dict[str, Any]:
+    """处理章级规划待生成节点的用户回答"""
+    state.history.append({"node": "CHAPTER_OUTLINE_REQUIRED", "answer": answer})
+    
+    project_dir_str = state.temp_data.get("project_dir", "")
+    vol = state.temp_data.get("vol", 1)
+    if not project_dir_str:
+        return error_payload(state, "CHAPTER_OUTLINE_REQUIRED", "项目目录丢失，无法继续。")
+    
+    project_dir = Path(project_dir_str)
+    from path_rules import chapter_outline_file
+    outline_file = chapter_outline_file(project_dir, vol)
+    
+    if not outline_file.exists():
+        return error_payload(
+            state,
+            "CHAPTER_OUTLINE_REQUIRED",
+            f"章级规划文件尚未生成，请确认已将章级规划保存到 {outline_file} 后再提交。",
+        )
+    
+    # 章级规划已生成，进入审阅
+    outline_text = outline_file.read_text(encoding="utf-8")
+    state.temp_data["chapter_outline_text"] = outline_text
+    return ask_node(
+        state,
+        "CHAPTER_OUTLINE_REVIEW",
+        message=f"章级规划已生成，请审阅：\n\n{outline_text}",
+    )
+
+
+def handle_chapter_outline_review_answer(state: SessionState, answer: str) -> dict[str, Any]:
+    """处理章级规划审阅节点的用户回答"""
+    labels = {option["label"] for option in CHAPTER_OUTLINE_REVIEW_OPTIONS}
+    if answer not in labels:
+        return invalid_answer(state, "CHAPTER_OUTLINE_REVIEW", "无效选择，重试一次后将安全退出。")
+    
+    state.retry_count["CHAPTER_OUTLINE_REVIEW"] = 0
+    state.history.append({"node": "CHAPTER_OUTLINE_REVIEW", "answer": answer})
+    
+    if answer == "结束":
+        return done_payload(state, "流程已结束。")
+    
+    if answer == "查看设定总览":
+        summary = build_project_summary(state)
+        outline_text = state.temp_data.get("chapter_outline_text", "[章级规划内容未加载]")
+        return ask_node(
+            state,
+            "CHAPTER_OUTLINE_REVIEW",
+            message=f"{summary}\n\n---\n\n当前章级规划：\n{outline_text}\n\n请确认是否使用此章级规划：",
+        )
+    
+    if answer == "要求修改":
+        # 清除已保存的章级规划（如果存在），要求重新生成
+        project_dir_str = state.temp_data.get("project_dir", "")
+        vol = state.temp_data.get("vol", 1)
+        if project_dir_str:
+            from path_rules import chapter_outline_file
+            outline_file = chapter_outline_file(Path(project_dir_str), vol)
+            if outline_file.exists():
+                outline_file.unlink()
+        
+        # 重新进入生成流程
+        return ask_node(state, "POST_SETUP_ACTION_2", message="已清除章级规划，请重新选择下一步：")
+    
+    if answer == "确认使用此章级规划":
+        # 章级规划已锁定，进入下一阶段：开始生成正文
+        return ask_node(state, "POST_SETUP_ACTION_3", message="章级规划已确认，请选择下一步：")
+    
+    return error_payload(state, "CHAPTER_OUTLINE_REVIEW", f"未处理的选择: {answer}")
 
 
 def handle_review_outline_answer(state: SessionState, answer: str) -> dict[str, Any]:
@@ -2079,18 +2503,8 @@ def handle_review_outline_answer(state: SessionState, answer: str) -> dict[str, 
         )
     
     if answer == "确认使用此卷纲":
-        # 卷纲已保存，直接进入正文生成
-        project_dir_str = state.temp_data.get("project_dir", "")
-        if not project_dir_str:
-            return error_payload(state, "REVIEW_OUTLINE", "项目目录丢失，无法继续。")
-        
-        project_dir = Path(project_dir_str)
-        return run_script_payload(
-            state,
-            "WRITING_ENTRY",
-            [sys.executable, str(SCRIPT_DIR / "continuous_writer.py"), "run", str(project_dir)],
-            f"卷纲已锁定，开始进入正文生成调度。",
-        )
+        # 卷纲已锁定，进入下一阶段：生成章级规划
+        return ask_node(state, "POST_SETUP_ACTION_2", message="卷纲已确认，请选择下一步：")
     
     return error_payload(state, "REVIEW_OUTLINE", f"未处理的选择: {answer}")
 
@@ -2223,10 +2637,24 @@ def answer(session_id: str, value: Any) -> dict[str, Any]:
         return handle_generic_pick_answer(state, state.current_node, normalized, "NAMING_DERIVE", NAMING_FIELD_SPECS, "naming_raw", finalize_naming, "NAMING_REVIEW")
     if state.current_node == "NAMING_REVIEW":
         return handle_naming_review_answer(state, normalized)
-    if state.current_node == "POST_SETUP_ACTION":
-        return handle_post_setup_action_answer(state, normalized)
+    if state.current_node == "POST_SETUP_ACTION_1":
+        return handle_post_setup_action_1_answer(state, normalized)
+    if state.current_node == "POST_SETUP_ACTION_2":
+        return handle_post_setup_action_2_answer(state, normalized)
+    if state.current_node == "POST_SETUP_ACTION_3":
+        return handle_post_setup_action_3_answer(state, normalized)
+    if state.current_node == "GENERATE_OUTLINE_CONFIRM":
+        return handle_generate_outline_confirm_answer(state, normalized)
+    if state.current_node == "GENERATE_CHAPTER_OUTLINE_CONFIRM":
+        return handle_generate_chapter_outline_confirm_answer(state, normalized)
+    if state.current_node == "OUTLINE_REQUIRED":
+        return handle_outline_required_answer(state, normalized)
+    if state.current_node == "CHAPTER_OUTLINE_REQUIRED":
+        return handle_chapter_outline_required_answer(state, normalized)
     if state.current_node == "REVIEW_OUTLINE":
         return handle_review_outline_answer(state, normalized)
+    if state.current_node == "CHAPTER_OUTLINE_REVIEW":
+        return handle_chapter_outline_review_answer(state, normalized)
     if state.current_node == "OUTLINE_REVISION":
         # 处理用户对卷纲的修改意见
         state.history.append({"node": "OUTLINE_REVISION", "answer": normalized})
@@ -2240,8 +2668,8 @@ def answer(session_id: str, value: Any) -> dict[str, Any]:
                 outline_file = Path(project_dir_str) / "reference" / "卷纲总表.md"
                 if outline_file.exists():
                     outline_file.unlink()
-            # 重新进入POST_SETUP_ACTION，让用户再次选择"开始生成正文"
-            return ask_node(state, "POST_SETUP_ACTION", message="已清除当前卷纲。请再次选择'开始生成正文'以重新生成卷纲。")
+            # 重新进入POST_SETUP_ACTION_1，让用户再次选择"生成卷纲"
+            return ask_node(state, "POST_SETUP_ACTION_1", message="已清除当前卷纲。请再次选择'生成卷纲'以重新生成卷纲。")
         else:
             # 保存用户的修改意见，用于下次生成时参考
             state.temp_data["revision_note"] = normalized
@@ -2251,7 +2679,7 @@ def answer(session_id: str, value: Any) -> dict[str, Any]:
                 outline_file = Path(project_dir_str) / "reference" / "卷纲总表.md"
                 if outline_file.exists():
                     outline_file.unlink()
-            return ask_node(state, "POST_SETUP_ACTION", message=f"已记录您的修改意见：'{normalized}'。请再次选择'开始生成正文'以重新生成卷纲。")
+            return ask_node(state, "POST_SETUP_ACTION_1", message=f"已记录您的修改意见：'{normalized}'。请再次选择'生成卷纲'以重新生成卷纲。")
     if state.current_node == "ACTION_MENU":
         return handle_action_menu_answer(state, normalized)
     if state.current_node == "FINAL_MENU":
@@ -2277,7 +2705,7 @@ def resume(session_id: str) -> dict[str, Any]:
     if state.current_node == "DONE":
         return done_payload(state, "流程已结束。")
     if state.current_node == "POST_SETUP_SUMMARY":
-        return ask_node(state, "POST_SETUP_ACTION")
+        return ask_node(state, "POST_SETUP_ACTION_1")
     if state.current_node == "REVIEW_OUTLINE":
         # 恢复卷纲审阅状态
         outline_text = state.temp_data.get("outline_text", "[卷纲内容未加载]")
@@ -2285,6 +2713,84 @@ def resume(session_id: str) -> dict[str, Any]:
             state,
             "REVIEW_OUTLINE",
             message=f"卷纲审阅（恢复会话）：\n\n{outline_text}\n\n请确认是否使用此卷纲：",
+        )
+    if state.current_node == "CHAPTER_OUTLINE_REVIEW":
+        # 恢复章级规划审阅状态
+        outline_text = state.temp_data.get("chapter_outline_text", "[章级规划内容未加载]")
+        return ask_node(
+            state,
+            "CHAPTER_OUTLINE_REVIEW",
+            message=f"章级规划审阅（恢复会话）：\n\n{outline_text}\n\n请确认是否使用此章级规划：",
+        )
+    if state.current_node == "GENERATE_OUTLINE_CONFIRM":
+        # 恢复生成卷纲确认状态
+        prompt_file = state.temp_data.get("outline_prompt_file", "")
+        return ask_node(
+            state,
+            "GENERATE_OUTLINE_CONFIRM",
+            message=f"项目卷纲尚未生成。prompt文件已保存到：{prompt_file}\n\n是否进入卷纲生成阶段？",
+        )
+    if state.current_node == "GENERATE_CHAPTER_OUTLINE_CONFIRM":
+        # 恢复生成章级规划确认状态
+        prompt_file = state.temp_data.get("chapter_outline_prompt_file", "")
+        vol = state.temp_data.get("vol", 1)
+        return ask_node(
+            state,
+            "GENERATE_CHAPTER_OUTLINE_CONFIRM",
+            message=f"第{vol}卷章级规划尚未生成。prompt文件已保存到：{prompt_file}\n\n是否进入章级规划生成阶段？",
+        )
+    if state.current_node == "OUTLINE_REQUIRED":
+        # 恢复卷纲生成等待状态
+        project_dir_str = state.temp_data.get("project_dir", "")
+        prompt_file = state.temp_data.get("outline_prompt_file", "")
+        if project_dir_str and prompt_file:
+            project_dir = Path(project_dir_str)
+            outline_file = project_dir / "reference" / "卷纲总表.md"
+            if outline_file.exists():
+                # 文件已生成，直接进入审阅
+                outline_text = outline_file.read_text(encoding="utf-8")
+                state.temp_data["outline_text"] = outline_text
+                return ask_node(
+                    state,
+                    "REVIEW_OUTLINE",
+                    message=f"卷纲已生成，请审阅：\n\n{outline_text}\n\n请确认是否使用此卷纲：",
+                )
+        # 文件尚未生成，重新提示
+        if not project_dir_str:
+            return error_payload(state, "OUTLINE_REQUIRED", "项目目录丢失，无法继续。")
+        return outline_required_payload(
+            state,
+            Path(project_dir_str),
+            prompt_file,
+            message="项目卷纲尚未生成。请使用外部LLM生成卷纲，然后将结果保存到指定路径。",
+        )
+    if state.current_node == "CHAPTER_OUTLINE_REQUIRED":
+        # 恢复章级规划生成等待状态
+        project_dir_str = state.temp_data.get("project_dir", "")
+        prompt_file = state.temp_data.get("chapter_outline_prompt_file", "")
+        vol = state.temp_data.get("vol", 1)
+        if project_dir_str and prompt_file:
+            project_dir = Path(project_dir_str)
+            from path_rules import chapter_outline_file
+            outline_file = chapter_outline_file(project_dir, vol)
+            if outline_file.exists():
+                # 文件已生成，进入审阅
+                outline_text = outline_file.read_text(encoding="utf-8")
+                state.temp_data["chapter_outline_text"] = outline_text
+                return ask_node(
+                    state,
+                    "CHAPTER_OUTLINE_REVIEW",
+                    message=f"章级规划已生成（恢复会话），请审阅：\n\n{outline_text}",
+                )
+        # 文件尚未生成，重新提示
+        if not project_dir_str:
+            return error_payload(state, "CHAPTER_OUTLINE_REQUIRED", "项目目录丢失，无法继续。")
+        return chapter_outline_required_payload(
+            state,
+            Path(project_dir_str),
+            prompt_file,
+            vol,
+            message=f"第{vol}卷章级规划尚未生成。请使用外部LLM生成章级规划，然后将结果保存到指定路径。",
         )
     if state.current_node == "OUTLINE_REVISION":
         # 恢复到卷纲审阅，让用户重新选择
@@ -2358,8 +2864,8 @@ def resume(session_id: str) -> dict[str, Any]:
                         "issues": cw_result.get("issues", []),
                         "message": f"第{cw_result.get('vol')}卷第{cw_result.get('ch')}章正文生成失败。",
                     }
-            except (subprocess.CalledProcessError, json.JSONDecodeError):
-                pass
+            except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+                return report_payload(state, state.current_node, f"正文生成调度失败: {exc}")
         
         return report_payload(state, state.current_node, "当前处于正文生成阶段，请按提示操作。")
     
@@ -2461,7 +2967,7 @@ def submit_derived(session_id: str, node: str, value: str) -> dict[str, Any]:
         project["naming_raw"] = payload["recommended"].copy()
         project["naming"] = build_naming_from_values(payload, payload["recommended"])
         project["stage"] = "naming_locked"
-        return ask_node(state, "POST_SETUP_ACTION", message=f"已按模型推荐自动锁定命名。推荐理由：{payload['reason']}\n全部前期设定已锁定完成。")
+        return ask_node(state, "POST_SETUP_ACTION_1", message=f"已按模型推荐自动锁定命名。推荐理由：{payload['reason']}\n全部前期设定已锁定完成。")
     project["naming_raw"] = empty_new_project_state()["naming_raw"]
     return ask_node(state, NAMING_FIELD_SPECS[0][1], message="命名候选已生成，请开始锁定书名。")
 
@@ -2637,6 +3143,14 @@ def main() -> int:
             payload = resume(args.session)
     except FileNotFoundError:
         payload = error_payload(None, "SESSION", "会话不存在。")
+    except json.JSONDecodeError:
+        payload = error_payload(None, "SESSION", "会话文件损坏。")
+    except KeyError as e:
+        payload = error_payload(None, "UNKNOWN", f"未知节点或配置缺失: {e}")
+    except ValueError as e:
+        payload = error_payload(None, "UNKNOWN", f"参数错误: {e}")
+    except Exception as e:
+        payload = error_payload(None, "UNKNOWN", f"内部错误：{type(e).__name__}: {e}")
     return emit(payload)
 
 
