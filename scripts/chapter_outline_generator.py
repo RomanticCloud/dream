@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from common_io import load_json_file, load_project_state, save_json_file
+from common_io import load_json_file, load_project_state, save_json_file, get_chapters_per_volume
 from path_rules import chapter_outline_file
 
 
