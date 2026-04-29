@@ -54,25 +54,37 @@
 
 ### body_required
 - 启动 Task 子代理：
-  1. 读取 `prompt_file` 和 `manifest_file`
-  2. 按 `required_read_sequence` 读取全部前文
-  3. 生成正文（2000-2500字）
-  4. **自检格式**（最多3次重试）：
-     - 时间流逝：`^\d+(分钟|小时|天|月)$`
-     - 时间点：`^第\d+天(清晨|早晨|上午|中午|下午|傍晚|晚上|深夜)$`
-     - 资源格式：`[+-]\d+[\u4e00-\u9fa5A-Za-z]+`
-     - 悬念强度：`^[1-9]|10$`
-     - 检查 `## 正文` 标记存在
-     - 检查正文不含 `## 内部工作卡`
-  5. 直接写入 `chapters/volXX/chXX.md`
+  1. 读取 `prompt_file`、`manifest_file`、`request_file`
+  2. 如果 JSON 中存在非空 `model_runner_command`，优先直接执行该命令调用配置模型生成正文；执行后再次运行 `python3 scripts/continuous_writer.py run <project_dir> --generation-mode auto` 推进状态
+  3. 如果 `model_runner_command` 为空，使用当前 opencode/Task 模型按 `prompt_file` 执行正文生成
+  4. 默认使用 `compact_context` 链路：按 `required_context_files` 读取轻量上下文包、连续性账本和生成前预检计划
+  5. 仅当请求中 `context_mode=full` 时，才按旧版 `required_read_sequence` 全量读取前文
+  6. 生成正文（使用项目锁定字数范围）
+  7. **自检格式**（最多3次重试）：
+      - 时间流逝：`^\d+(分钟|小时|天|月)$`
+      - 时间点：`^第\d+天(清晨|早晨|上午|中午|下午|傍晚|晚上|深夜)$`
+      - 资源格式：`[+-]\d+[\u4e00-\u9fa5A-Za-z]+`
+      - 悬念强度：`^[1-9]|10$`
+      - 检查 `## 正文` 标记存在
+      - 检查正文不含 `## 内部工作卡`
+      - 检查正文服从 `preflight_plan` 与 `CONTINUITY_LEDGER`
+  8. 直接写入 `chapters/volXX/chXX.md`
 - 完成后向 orchestrator 提交 `answer`
+
+### 模型配置
+- skill 根目录默认配置：`dream_model_config.json`
+- 项目目录可放置同名 `dream_model_config.json` 覆盖默认配置
+- 进入正文生成前会先出现 `BODY_MODEL_SELECT` question，选项来自配置中的 `providers` 和默认 `opencode/current`
+- 正文生成读取 `body` 配置；当 `body.backend=opencode` 时使用当前 opencode 模型，当 `body.provider=deepseek` 且 provider backend 为 `openai_compatible` 时，使用 `scripts/model_runner.py` 调用 DeepSeek
+- API Key 只通过环境变量读取，例如 DeepSeek 使用 `DEEPSEEK_API_KEY`，不得写入配置文件
 
 ### cards_required
 - 启动 Task 子代理：
-  1. 读取 `prompt_file` 和正文文件
-  2. 生成6张工作卡
+  1. 读取 `prompt_file`、正文文件和 `chapter_facts` 文件
+  2. 基于正文事实抽取结果生成6张工作卡，不得新增正文未发生事实
   3. **自检格式**（最多3次重试）
-  4. 直接写入 `chapters/volXX/cards/chXX_card.md`
+  4. 通过章节校验后更新 `context/CONTINUITY_LEDGER.json` 与 `context/CONTINUITY_LEDGER.md`
+  5. 直接写入 `chapters/volXX/cards/chXX_card.md`
 - 完成后向 orchestrator 提交 `answer`
 
 ### chapter_ready

@@ -425,13 +425,21 @@ def validate_chapter(
                     message=ei.message
                 ))
 
+    contract_issues = EnhancedValidator(project_dir).validate_generation_contract(vol_num, ch_num)
+    for ei in contract_issues:
+        all_issues.append(ValidationIssue(
+            type=ei.severity,
+            message=ei.message
+        ))
+
     # 检查资源卡格式（仅 POWER_SYSTEM 项目）
     resource_format_issues = validate_resource_format(content, state)
     all_issues.extend(resource_format_issues)
 
     has_errors = any(issue.type == "error" for issue in all_issues)
     has_format_error = any(issue.type == "error" and "标记" in issue.message for issue in all_issues)
-    revision_tasks = build_revision_tasks(all_issues)
+    blocking_issues = [issue for issue in all_issues if issue.type == "error"]
+    revision_tasks = build_revision_tasks(blocking_issues)
 
     fix_plan = {}
     if not has_format_error:
@@ -445,11 +453,11 @@ def validate_chapter(
             })
             fix_plan["total_regenerate"] = len(fix_plan["regenerate"])
         has_rewrite_card = any(task.get("fix_method") == "rewrite_card" for task in revision_tasks)
-        if fix_plan.get("total_regenerate", 0) > 0:
+        if has_errors and fix_plan.get("total_regenerate", 0) > 0:
             set_chapter_revision(project_dir, vol_num, ch_num, "pending_regenerate", fix_plan, revision_tasks)
-        elif has_rewrite_card:
+        elif has_errors and has_rewrite_card:
             set_chapter_revision(project_dir, vol_num, ch_num, "pending_rewrite_card", fix_plan, revision_tasks)
-        elif fix_plan.get("total_polish", 0) > 0 or revision_tasks:
+        elif revision_tasks:
             set_chapter_revision(project_dir, vol_num, ch_num, "pending_polish", fix_plan, revision_tasks)
         else:
             clear_chapter_revision(project_dir, vol_num, ch_num)

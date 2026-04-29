@@ -39,12 +39,15 @@ def get_cached_validation(project_dir: Path, vol: int, ch: int) -> dict | None:
     entry = cache[key]
     
     # 检查文件是否修改
-    from path_rules import chapter_file
+    from path_rules import chapter_file, chapter_card_file
     chapter_path = chapter_file(project_dir, vol, ch)
     if not chapter_path.exists():
         return None
-    
+
+    card_path = chapter_card_file(project_dir, vol, ch)
     current_fp = _get_file_fingerprint(chapter_path)
+    if card_path.exists():
+        current_fp += ":" + _get_file_fingerprint(card_path)
     if entry.get("fingerprint") != current_fp:
         return None  # 文件已修改，缓存失效
     
@@ -70,8 +73,9 @@ def save_validation_cache(project_dir: Path, vol: int, ch: int, result) -> None:
             cache = {}
     
     key = f"vol{vol:02d}_ch{ch:02d}"
-    from path_rules import chapter_file
+    from path_rules import chapter_file, chapter_card_file
     chapter_path = chapter_file(project_dir, vol, ch)
+    card_path = chapter_card_file(project_dir, vol, ch)
     
     # 只缓存通过的校验结果
     if not result.passed:
@@ -82,7 +86,7 @@ def save_validation_cache(project_dir: Path, vol: int, ch: int, result) -> None:
         return
     
     cache[key] = {
-        "fingerprint": _get_file_fingerprint(chapter_path),
+        "fingerprint": _get_file_fingerprint(chapter_path) + ((":" + _get_file_fingerprint(card_path)) if card_path.exists() else ""),
         "timestamp": time.time(),
         "result": {
             "passed": result.passed,

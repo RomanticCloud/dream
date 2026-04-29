@@ -8,9 +8,11 @@ from pathlib import Path
 from typing import Optional
 
 from card_names import CARRY_CARD, STATUS_CARD
-from card_fields import FIELD_CARRY_MUST, FIELD_STATUS_EMOTION, FIELD_STATUS_LOCATION
-from common_io import extract_body, extract_section, extract_bullets
+from card_fields import FIELD_CARRY_MUST, FIELD_STATUS_EMOTION, FIELD_STATUS_GOAL, FIELD_STATUS_LOCATION
+from common_io import extract_body, extract_section, extract_bullets, load_json_file
 from chapter_view import load_chapter_view
+from continuity_ledger import load_ledger
+from preflight_planner import preflight_file
 from narrative_context import NarrativeContext
 from state_tracker import StateTracker
 
@@ -250,6 +252,103 @@ class EnhancedValidator:
 
         return issues
 
+    def validate_generation_contract(self, vol_num: int, ch_num: int) -> list[ValidationIssue]:
+        """Validate chapter against ledger and preflight constraints.
+
+        These checks are deliberately conservative and blocking for only the
+        highest-risk continuity failures.
+        """
+        issues: list[ValidationIssue] = []
+        try:
+            view = load_chapter_view(self.project_dir, vol_num, ch_num)
+            content = view.merged_text
+        except Exception as exc:
+            return [ValidationIssue("error", f"读取章节失败，无法执行生成契约检查: {exc}")]
+
+        body = extract_body(content)
+        status = extract_bullets(extract_section(content, STATUS_CARD))
+        carry = extract_bullets(extract_section(content, CARRY_CARD))
+        ledger = load_ledger(self.project_dir)
+        constraints = ledger.get("open_constraints", {})
+        hard_facts = ledger.get("hard_facts", [])[-20:]
+        current_state = ledger.get("current_state", {})
+
+        # First chapter may not have a useful ledger yet.
+        if ch_num > 1:
+            must_handle = constraints.get("must_handle", "")
+            if must_handle and not _soft_text_overlap(must_handle, body):
+                issues.append(ValidationIssue(
+                    "error",
+                    f"[连续性阻塞] 上章要求必须接住的内容未在正文中充分体现：{must_handle}",
+                    "请在本章开场或主推进中明确处理该承接项。",
+                ))
+
+            hook = constraints.get("strongest_hook", "")
+            if hook and not _soft_text_overlap(hook, body[:1200]):
+                issues.append(ValidationIssue(
+                    "warning",
+                    f"[连续性] 上章最强钩子可能没有在本章开场承接：{hook}",
+                    "建议在本章前半段回应或延续该钩子。",
+                ))
+
+            prev_location = current_state.get("location", "")
+            current_location = status.get(FIELD_STATUS_LOCATION, "")
+            if prev_location and current_location and prev_location != current_location:
+                opening = body[:1000]
+                if current_location not in opening and not any(word in opening for word in ["来到", "抵达", "回到", "离开", "赶到", "走进"]):
+                    issues.append(ValidationIssue(
+                        "warning",
+                        f"[场景衔接] 位置从“{prev_location}”变为“{current_location}”，正文开场缺少明确转场。",
+                        "请补足场景转移或保持上一章地点。",
+                    ))
+
+            prev_goal = current_state.get("goal", "")
+            current_goal = status.get(FIELD_STATUS_GOAL, "")
+            if prev_goal and current_goal and prev_goal != current_goal and not _soft_text_overlap(prev_goal, body):
+                issues.append(ValidationIssue(
+                    "warning",
+                    f"[目标衔接] 主角目标从“{prev_goal}”变为“{current_goal}”，正文缺少过渡。",
+                    "请在正文中交代目标变化原因。",
+                ))
+
+        for fact in hard_facts:
+            if fact and _contradiction_marker(fact, body):
+                issues.append(ValidationIssue(
+                    "error",
+                    f"[事实阻塞] 正文疑似违背禁止事实：{fact}",
+                    "请修改正文或工作卡，确保稳定事实不被推翻。",
+                ))
+
+        pf = load_json_file(preflight_file(self.project_dir, vol_num, ch_num), default={})
+        if pf:
+            main_progress = str(pf.get("main_progress") or "")
+            if main_progress and not _soft_text_overlap(main_progress, body):
+                issues.append(ValidationIssue(
+                    "warning",
+                    f"[主线漂移] 正文与预检主推进关联较弱：{main_progress[:120]}",
+                    "请确认本章核心事件服务章纲和卷目标。",
+                ))
+            for item in pf.get("must_not_break", [])[:10]:
+                if item and _contradiction_marker(str(item), body):
+                    issues.append(ValidationIssue(
+                        "error",
+                        f"[预检阻塞] 正文疑似违背预检禁止项：{item}",
+                        "请按预检计划修正。",
+                    ))
+
+        # Work card fields should not introduce entirely absent events.
+        for field, value in carry.items():
+            if field == FIELD_CARRY_MUST:
+                continue
+            if value and value not in {"无", "-0", "继承上章"} and len(value) >= 6 and not _soft_text_overlap(value, body):
+                issues.append(ValidationIssue(
+                    "warning",
+                    f"[卡文一致] 承上启下卡字段“{field}”缺少正文依据：{value}",
+                    "请确保工作卡只记录正文中已经出现或明确暗示的信息。",
+                ))
+
+        return issues
+
     def detect_drift_patterns(self, state_history: list[dict]) -> list[ValidationIssue]:
         """检测漂移模式
 
@@ -296,3 +395,58 @@ class EnhancedValidator:
         # 这里可以添加更复杂的检测逻辑
 
         return issues
+
+
+def _tokens(text: str) -> set[str]:
+    text = text.strip()
+    if not text:
+        return set()
+    chunks = set()
+    for part in re_split_text(text):
+        if len(part) >= 2:
+            chunks.add(part)
+    return chunks
+
+
+def re_split_text(text: str) -> list[str]:
+    import re
+    parts = re.split(r"[，。！？、；：,.;:!?\s/（）()\[\]【】]+", text)
+    short = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        if len(part) > 12:
+            short.extend(part[i:i + 6] for i in range(0, len(part), 6))
+        else:
+            short.append(part)
+    return short
+
+
+def _soft_text_overlap(requirement: str, body: str) -> bool:
+    if not requirement:
+        return True
+    if requirement in body:
+        return True
+    tokens = [token for token in _tokens(requirement) if token not in {"必须", "需要", "不能", "什么", "本章", "下章"}]
+    if not tokens:
+        return True
+    hits = sum(1 for token in tokens if token in body)
+    return hits >= max(1, len(tokens) // 3)
+
+
+def _contradiction_marker(fact: str, body: str) -> bool:
+    """Conservative contradiction heuristic to avoid false positives."""
+    if not fact or not body:
+        return False
+    if "死亡" in fact and any(word in body for word in ["复活", "重新站起", "安然无恙"]):
+        return True
+    if "离开" in fact and "一直在场" in body:
+        return True
+    if "不能" in fact:
+        forbidden = fact.split("不能", 1)[1].strip(" ：，。")
+        return bool(forbidden and forbidden in body)
+    if "不得" in fact:
+        forbidden = fact.split("不得", 1)[1].strip(" ：，。")
+        return bool(forbidden and forbidden in body)
+    return False

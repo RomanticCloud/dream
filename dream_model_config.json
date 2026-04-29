@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "body": {
+    "backend": "opencode",
+    "provider": "opencode",
+    "model": "current",
+    "temperature": 0.8,
+    "max_tokens": 6000
+  },
+  "providers": {
+    "deepseek": {
+      "backend": "openai_compatible",
+      "base_url": "https://api.deepseek.com",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "model": "deepseek-v4-pro",
+      "context_window_tokens": 1000000
+    },
+    "kimi": {
+      "backend": "openai_compatible",
+      "base_url": "https://api.moonshot.cn/v1",
+      "api_key_env": "KIMI_API_KEY",
+      "model": "kimi-k2.6",
+      "requires_api_key": true
+    },
+    "openai_compatible": {
+      "backend": "openai_compatible",
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "model": "gpt-4o-mini"
+    }
+  }
+}

@@ -41,8 +41,11 @@ from card_fields import (
 )
 from chapter_validator import validate_chapter
 from chapter_view import save_split_chapter
+from chapter_fact_extractor import extract_facts_from_body_text, fact_file
 from common_io import save_json_file
+from continuity_ledger import load_ledger, update_ledger_for_chapter
 from path_rules import chapter_file, chapter_card_file
+from runtime_cache import invalidate_runtime_cache
 
 
 @dataclass
@@ -104,8 +107,12 @@ class CardDispatcher:
         # 2. 读取前文工作卡（用于状态继承）
         previous_state = self._load_previous_state(vol_num, ch_num)
         
-        # 3. 生成工作卡prompt
-        prompt = self._generate_card_prompt(vol_num, ch_num, body_text, previous_state, last_errors, retry_count)
+        # 3. 从正文抽取事实，工作卡只能基于正文事实填写
+        facts = extract_facts_from_body_text(body_text, vol_num, ch_num)
+        save_json_file(fact_file(self.project_dir, vol_num, ch_num), facts)
+
+        # 4. 生成工作卡prompt
+        prompt = self._generate_card_prompt(vol_num, ch_num, body_text, previous_state, last_errors, retry_count, facts=facts)
         
         # 4. 保存prompt
         prompt_file = self.project_dir / "context" / f"card_prompt_vol{vol_num:02d}_ch{ch_num:02d}.md"
@@ -121,6 +128,7 @@ class CardDispatcher:
             "ch": ch_num,
             "prompt_file": str(prompt_file),
             "body_file": str(body_file),
+            "fact_file": str(fact_file(self.project_dir, vol_num, ch_num)),
             "prompt_length": len(prompt),
             "retry_count": retry_count,
             "requirements": {
@@ -218,6 +226,7 @@ class CardDispatcher:
         
         chapter_path.write_text(body_text, encoding="utf-8")
         card_path.write_text(chapter_cards, encoding="utf-8")
+        invalidate_runtime_cache(self.project_dir, vol_num, ch_num)
         
         # 执行完整校验（含跨章一致性）
         if validate:
@@ -232,6 +241,19 @@ class CardDispatcher:
                     issues=[issue.message for issue in validation.issues]
                 )
         
+        # 校验通过后更新连续性账本，下一章默认读取账本而不是全前文
+        try:
+            update_ledger_for_chapter(self.project_dir, vol_num, ch_num)
+        except Exception as exc:
+            return CardConsumeResult(
+                status="validation_failed",
+                vol=vol_num,
+                ch=ch_num,
+                chapter_file=str(chapter_path),
+                card_file=str(card_path),
+                issues=[f"连续性账本更新失败: {exc}"]
+            )
+
         # 删除临时正文文件（合并后删除）
         # 只有当 body_file 和 chapter_path 不是同一文件时才删除
         if body_file.exists() and body_file.resolve() != chapter_path.resolve():
@@ -365,13 +387,17 @@ class CardDispatcher:
         chapters = [int(f.stem.replace("ch", "")) for f in vol_dir.glob("ch*.md") if f.stem.replace("ch", "").isdigit()]
         return max(chapters) if chapters else None
     
-    def _generate_card_prompt(self, vol_num: int, ch_num: int, body_text: str, previous_state: dict[str, str], last_errors: list[str] | None = None, retry_count: int = 0) -> str:
+    def _generate_card_prompt(self, vol_num: int, ch_num: int, body_text: str, previous_state: dict[str, str], last_errors: list[str] | None = None, retry_count: int = 0, facts: dict | None = None) -> str:
         """生成工作卡专用prompt"""
         
         # 计算输出路径
         from path_rules import chapter_card_file
         card_output = chapter_card_file(self.project_dir, vol_num, ch_num)
         
+        facts = facts or extract_facts_from_body_text(body_text, vol_num, ch_num)
+        ledger = load_ledger(self.project_dir)
+        constraints = ledger.get("open_constraints", {})
+        current_state = ledger.get("current_state", {})
         retry_info = ""
         if retry_count > 0 and last_errors:
             retry_info = f"""
@@ -407,9 +433,28 @@ class CardDispatcher:
 
 """
         
+        fact_section = f"""
+## 正文事实抽取（工作卡必须以此为依据）
+- 开头摘录：{facts.get('opening_excerpt', '')}
+- 结尾摘录：{facts.get('ending_excerpt', '')}
+- 时间词：{'、'.join(facts.get('time_mentions', [])) or '未检测到'}
+- 资源/数字词：{'、'.join(facts.get('resource_mentions', [])) or '未检测到'}
+- 字数提示：{facts.get('word_count_hint', 0)}
+
+## 连续性账本约束
+- 上章结束位置：{current_state.get('location', '')}
+- 上章结束情绪：{current_state.get('emotion', '')}
+- 上章目标：{current_state.get('goal', '')}
+- 本章必须接住：{constraints.get('must_handle', '')}
+- 本章不能忘：{constraints.get('must_not_forget', '')}
+- 待回收：{constraints.get('need_payoff', '')}
+- 上章最强钩子：{constraints.get('strongest_hook', '')}
+
+"""
+
         prompt = f"""# 工作卡生成任务
 
-{retry_info}{previous_state_section}
+{retry_info}{previous_state_section}{fact_section}
 ## 任务说明
 本章正文已生成完毕，请根据正文内容生成完整的工作卡。
 
@@ -494,8 +539,10 @@ class CardDispatcher:
    - 6张卡片（1-6）全部存在
 
 5. **内容一致性**：
-   - 工作卡内容必须与正文一致
-   - 不得出现正文中没有的事件或人物
+    - 工作卡内容必须与正文一致
+    - 不得出现正文中没有的事件或人物
+   - 不得把连续性账本中的待回收伏笔写成已回收，除非正文事实中已经明确处理
+   - 状态卡结尾状态必须能从正文结尾或即时后果中推导
 
 发现问题立即修正，再输出最终版本。
 

@@ -2643,6 +2643,8 @@ def answer(session_id: str, value: Any) -> dict[str, Any]:
         return handle_post_setup_action_2_answer(state, normalized)
     if state.current_node == "POST_SETUP_ACTION_3":
         return handle_post_setup_action_3_answer(state, normalized)
+    if state.current_node == "BODY_MODEL_SELECT":
+        return handle_body_model_select_answer(state, normalized)
     if state.current_node == "GENERATE_OUTLINE_CONFIRM":
         return handle_generate_outline_confirm_answer(state, normalized)
     if state.current_node == "GENERATE_CHAPTER_OUTLINE_CONFIRM":
@@ -2824,7 +2826,7 @@ def resume(session_id: str) -> dict[str, Any]:
                         str(SCRIPT_DIR / "continuous_writer.py"),
                         "run",
                         project_dir,
-                        "--mode", "auto",
+                        "--generation-mode", "auto",
                     ],
                     capture_output=True,
                     text=True,
@@ -2842,6 +2844,10 @@ def resume(session_id: str) -> dict[str, Any]:
                         "ch": cw_result.get("ch"),
                         "prompt_file": cw_result.get("prompt_file"),
                         "manifest_file": cw_result.get("manifest_file"),
+                        "request_file": cw_result.get("request_file"),
+                        "project_dir": cw_result.get("project_dir", project_dir),
+                        "model": cw_result.get("model", {}),
+                        "model_runner_command": cw_result.get("model_runner_command", ""),
                         "message": f"请生成第{cw_result.get('vol')}卷第{cw_result.get('ch')}章正文。",
                     }
                 elif status == "body_ready":
@@ -2990,7 +2996,7 @@ def submit_body(session_id: str, result_file: str) -> dict[str, Any]:
                 "run",
                 project_dir,
                 "--task-result-file", result_file,
-                "--mode", "auto",
+                "--generation-mode", "auto",
             ],
             capture_output=True,
             text=True,
@@ -3005,7 +3011,7 @@ def submit_body(session_id: str, result_file: str) -> dict[str, Any]:
     status = cw_result.get("status")
     
     if status == "body_ready":
-        # 正文校验通过，返回 generate_cards 状态
+        # 正文校验通过，返回 cards_required 状态
         return {
             "status": "generate_cards",
             "session_id": state.session_id,
@@ -3051,7 +3057,7 @@ def submit_cards(session_id: str, result_file: str) -> dict[str, Any]:
                 "run",
                 project_dir,
                 "--task-result-file", result_file,
-                "--mode", "auto",
+                "--generation-mode", "auto",
             ],
             capture_output=True,
             text=True,

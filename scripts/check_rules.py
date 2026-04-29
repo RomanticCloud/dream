@@ -16,6 +16,7 @@ from card_fields import (
     FIELD_RESOURCE_SETUP,
     FIELD_STATUS_EMOTION,
     FIELD_STATUS_GOAL,
+    FIELD_STATUS_LOCATION,
 )
 from card_parser import extract_body, extract_section, extract_bullets
 from rule_engine import CheckResult
@@ -109,13 +110,19 @@ def _detect_location_inconsistency(chapter_bodies: list[tuple[int, str]]) -> lis
     prev_locations: Optional[str] = None
 
     for chapter_num, body in chapter_bodies:
-        current_locations = _collect_locations(body)
+        state_card = extract_bullets(extract_section(body, STATUS_CARD))
+        card_location = state_card.get(FIELD_STATUS_LOCATION, "")
+        current_locations = {card_location} if card_location else _collect_locations(body)
         if not current_locations:
             continue
 
         main_loc = next(iter(current_locations))
         if prev_locations and prev_locations != main_loc:
             if not any(loc in main_loc or main_loc in loc for loc in prev_locations):
+                transition_words = ["走向", "走进", "进入", "抵达", "来到", "返回", "再次踏入", "穿过", "沿着"]
+                if any(word in body for word in transition_words):
+                    prev_locations = main_loc
+                    continue
                 issues.append({
                     "chapter": chapter_num,
                     "previous": prev_locations,
@@ -474,6 +481,14 @@ def _check_goal_progression(chapters: list[tuple[int, str]], mode: str) -> Check
 
     unique_goals = len(set(g["goal"] for g in goals))
     total_goals = len(goals)
+    goal_text = "；".join(g["goal"] for g in goals)
+    shared_terms = [term for term in ["真相", "档案", "父亲", "主线", "调查", "追查"] if term in goal_text]
+    if shared_terms:
+        return CheckResult(
+            "目标追踪", True,
+            f"共{total_goals}个目标，其中{unique_goals}个不同，共享主线关键词：{'、'.join(shared_terms)}",
+            "目标服务同一主线"
+        )
 
     if unique_goals == total_goals and total_goals >= 3:
         return CheckResult(

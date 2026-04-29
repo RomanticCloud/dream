@@ -279,7 +279,7 @@ def write_memory_files(project_dir: Path, volume_memory: dict) -> tuple[Path, Pa
         f"- 状态变化：{volume_memory['final_state'].get('卷末状态变化', '')}",
         "",
         "## 稳定事实",
-    ]
+    ])
     lines.extend(_render_fact_lines(volume_memory.get("stable_facts", [])))
     lines.append("")
     lines.append("## 未证实信息")

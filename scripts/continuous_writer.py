@@ -35,6 +35,71 @@ def _emit(status: str, **extra) -> dict:
     return payload
 
 
+def _body_proof_file(project_dir: Path, vol_num: int, ch_num: int) -> Path:
+    return project_dir / "context" / f"body_execution_proof_vol{vol_num:02d}_ch{ch_num:02d}.json"
+
+
+def _validate_body_execution_proof(project_dir: Path, vol_num: int, ch_num: int) -> list[str]:
+    request_file = project_dir / "context" / "latest_body_request.json"
+    proof_file = _body_proof_file(project_dir, vol_num, ch_num)
+    if not request_file.exists():
+        return ["缺少 latest_body_request.json，无法证明正文生成读取了上下文"]
+    if not proof_file.exists():
+        return [f"缺少正文执行证明文件: {proof_file}"]
+    try:
+        request_payload = json.loads(request_file.read_text(encoding="utf-8"))
+        proof = json.loads(proof_file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [f"正文执行证明 JSON 损坏: {exc}"]
+    if request_payload.get("vol") != vol_num or request_payload.get("ch") != ch_num:
+        return ["latest_body_request.json 与当前卷章不匹配"]
+    if proof.get("context_manifest_id") != request_payload.get("context_manifest_id"):
+        return ["正文执行证明 context_manifest_id 与请求不一致"]
+    files_read = proof.get("files_read")
+    if not isinstance(files_read, list) or not files_read:
+        return ["正文执行证明缺少 files_read"]
+    if request_payload.get("strategy") == "compact_context":
+        required = request_payload.get("required_context_files") or []
+    else:
+        manifest_file = request_payload.get("manifest_file", "")
+        if not manifest_file or not Path(manifest_file).exists():
+            return ["正文请求缺少可读取的 manifest_file"]
+        manifest = json.loads(Path(manifest_file).read_text(encoding="utf-8"))
+        required = manifest.get("required_read_sequence") or []
+    if set(files_read) != set(required):
+        missing = sorted(set(required) - set(files_read))
+        return ["正文执行证明 files_read 未覆盖全部必读文件" + (f": {missing[:5]}" if missing else "")]
+    return []
+
+
+def _archive_failed_body(project_dir: Path, body_file: Path, vol_num: int, ch_num: int, reason: str) -> str:
+    archive_dir = project_dir / "context" / "failed_bodies"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    target = archive_dir / f"vol{vol_num:02d}_ch{ch_num:02d}_{reason}.md"
+    if body_file.exists():
+        target.write_text(body_file.read_text(encoding="utf-8"), encoding="utf-8")
+        body_file.unlink()
+    return str(target)
+
+
+def _fallback_to_full_context(project_dir: Path, vol_num: int, ch_num: int, body_file: Path, issues: list[str]) -> dict:
+    gen_state = load_generation_state(project_dir) or {}
+    if gen_state.get("context_mode") == "full":
+        return _emit("body_failed", vol=vol_num, ch=ch_num, body_file=str(body_file), issues=issues, context_mode="full")
+    archived = _archive_failed_body(project_dir, body_file, vol_num, ch_num, "compact_failed")
+    update_generation_state(project_dir, {
+        "phase": None,
+        "context_mode": "full",
+        "fallback_reason": issues,
+        "archived_failed_body": archived,
+    })
+    result = _generate_body_phase(project_dir, vol_num, ch_num, context_mode="full")
+    result["fallback_from"] = "compact_context"
+    result["fallback_reason"] = issues
+    result["archived_failed_body"] = archived
+    return result
+
+
 def run(project_dir: Path, task_result_file: str | None = None, mode: str | None = None) -> dict:
     """运行连续写作调度器（子代理模式）
     
@@ -62,6 +127,17 @@ def run(project_dir: Path, task_result_file: str | None = None, mode: str | None
     # 缓存 generation_state（避免多次读取同一文件）
     gen_state = load_generation_state(project_dir) or {}
     gen_phase = gen_state.get("phase")
+
+    if task_result_file:
+        vol = gen_state.get("current_vol")
+        ch = gen_state.get("current_ch")
+        if not vol or not ch:
+            return _emit("gate_failed", message="缺少当前生成状态，无法消费结果文件")
+        if gen_phase == "body_required":
+            return _consume_body_result(project_dir, task_result_file, int(vol), int(ch))
+        if gen_phase == "cards_required":
+            return _consume_cards_result(project_dir, task_result_file, int(vol), int(ch))
+        return _emit("gate_failed", message=f"当前阶段 {gen_phase} 不能消费结果文件")
     
     # 缓存进度信息（避免重复计算）
     current_vol, current_ch = get_current_progress(project_dir)
@@ -90,6 +166,9 @@ def run(project_dir: Path, task_result_file: str | None = None, mode: str | None
         # 检查正文文件是否已由子代理写入
         body_file = chapter_file(project_dir, vol, ch)
         if body_file.exists():
+            proof_issues = _validate_body_execution_proof(project_dir, vol, ch)
+            if proof_issues:
+                return _fallback_to_full_context(project_dir, vol, ch, body_file, proof_issues)
             # 验证正文
             from body_validator import validate_body
             body_text = body_file.read_text(encoding="utf-8")
@@ -104,13 +183,8 @@ def run(project_dir: Path, task_result_file: str | None = None, mode: str | None
                 })
                 return _generate_card_phase(project_dir, vol, ch)
             else:
-                # 正文验证失败，返回错误
-                return _emit(
-                    "body_failed",
-                    vol=vol, ch=ch,
-                    body_file=str(body_file),
-                    issues=[issue.message for issue in validation.issues],
-                )
+                # compact-context 正文失败后自动升级 full-context 重跑
+                return _fallback_to_full_context(project_dir, vol, ch, body_file, [issue.message for issue in validation.issues])
         
         # 正文不存在，返回 body_required（等待子代理生成）
         return _emit(
@@ -136,6 +210,17 @@ def run(project_dir: Path, task_result_file: str | None = None, mode: str | None
             # 验证完整章节
             validation = validate_chapter(project_dir, vol, ch)
             if validation.passed:
+                try:
+                    from continuity_ledger import update_ledger_for_chapter
+                    from plan_deviation_router import accept_from_facts
+                    accept_from_facts(project_dir, vol, ch)
+                    update_ledger_for_chapter(project_dir, vol, ch)
+                except Exception as exc:
+                    return _emit(
+                        "cards_failed",
+                        vol=vol, ch=ch,
+                        issues=[f"连续性账本更新失败: {exc}"],
+                    )
                 # 章节完成，清理状态
                 cleanup_generation_state(project_dir)
                 
@@ -200,7 +285,7 @@ def run(project_dir: Path, task_result_file: str | None = None, mode: str | None
     return _generate_body_phase(project_dir, next_vol, next_ch)
 
 
-def _generate_body_phase(project_dir: Path, vol_num: int, ch_num: int) -> dict:
+def _generate_body_phase(project_dir: Path, vol_num: int, ch_num: int, context_mode: str | None = None) -> dict:
     """Phase A: 生成正文"""
     # 检查当前卷是否有章级规划
     from chapter_plan_loader import check_volume_has_outline
@@ -210,16 +295,26 @@ def _generate_body_phase(project_dir: Path, vol_num: int, ch_num: int) -> dict:
         return generate_chapter_outline_dispatch(project_dir, vol_num)
     
     dispatcher = BodyDispatcher(project_dir)
-    result = dispatcher.dispatch(vol_num, ch_num)
+    if context_mode is None:
+        gen_state = load_generation_state(project_dir) or {}
+        context_mode = gen_state.get("context_mode") or "fast"
+    result = dispatcher.dispatch(vol_num, ch_num, context_mode=context_mode)
     
     if result.status == "error":
         return _emit("body_failed", vol=vol_num, ch=ch_num, error="生成正文prompt失败")
+
+    request_payload = {}
+    try:
+        request_payload = json.loads(Path(result.request_file).read_text(encoding="utf-8"))
+    except Exception:
+        request_payload = {}
     
     # 保存生成状态
     save_generation_state(project_dir, {
         "phase": "body_required",
         "current_vol": vol_num,
         "current_ch": ch_num,
+        "context_mode": context_mode,
         "body_prompt_file": result.prompt_file,
         "manifest_file": result.manifest_file,
         "context_manifest_id": result.context_manifest_id,
@@ -234,6 +329,10 @@ def _generate_body_phase(project_dir: Path, vol_num: int, ch_num: int) -> dict:
         manifest_file=result.manifest_file,
         context_manifest_id=result.context_manifest_id,
         body_output=result.body_output,
+        project_dir=str(project_dir),
+        context_mode=context_mode,
+        model=request_payload.get("model", {}),
+        model_runner_command=request_payload.get("model_runner_command", ""),
     )
 
 
@@ -280,8 +379,32 @@ def _consume_body_result(project_dir: Path, result_file: str, vol_num: int, ch_n
 def _generate_card_phase(project_dir: Path, vol_num: int, ch_num: int) -> dict:
     """Phase B: 生成工作卡"""
     from card_dispatcher import CardDispatcher
+    from card_auto_settler import write_auto_card
     
     dispatcher = CardDispatcher(project_dir)
+    card_file = chapter_card_file(project_dir, vol_num, ch_num)
+    if not card_file.exists():
+        try:
+            write_auto_card(project_dir, vol_num, ch_num)
+            validation = validate_chapter(project_dir, vol_num, ch_num)
+            if validation.passed:
+                try:
+                    from continuity_ledger import update_ledger_for_chapter
+                    from plan_deviation_router import accept_from_facts
+                    accept_from_facts(project_dir, vol_num, ch_num)
+                    update_ledger_for_chapter(project_dir, vol_num, ch_num)
+                except Exception as exc:
+                    return _emit("cards_failed", vol=vol_num, ch=ch_num, issues=[f"连续性账本更新失败: {exc}"])
+                cleanup_generation_state(project_dir)
+                try:
+                    from chapter_index import update_chapter_index
+                    update_chapter_index(project_dir)
+                except Exception:
+                    pass
+                return _emit("chapter_ready", vol=vol_num, ch=ch_num, chapter_file=str(chapter_file(project_dir, vol_num, ch_num)), card_file=str(card_file), auto_card=True)
+        except Exception:
+            # Fall through to prompt-based card generation.
+            pass
     
     # 检查是否有前一次失败的错误信息
     gen_state = load_generation_state(project_dir)
@@ -315,6 +438,7 @@ def _consume_cards_result(project_dir: Path, result_file: str, vol_num: int, ch_
     from card_dispatcher import CardDispatcher
     
     dispatcher = CardDispatcher(project_dir)
+    gen_state = load_generation_state(project_dir) or {}
     
     try:
         raw_result = Path(result_file).expanduser().resolve().read_text(encoding="utf-8")
@@ -345,7 +469,6 @@ def _consume_cards_result(project_dir: Path, result_file: str, vol_num: int, ch_
         )
     else:
         # 工作卡校验失败
-        # 使用已加载的 gen_state 避免重复加载
         retry_count = gen_state.get("card_retry_count", 0)
         retry_count += 1
         
